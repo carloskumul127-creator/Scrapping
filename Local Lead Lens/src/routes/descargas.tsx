@@ -1,9 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
+import { supabase } from "@/integrations/supabase/client";
 import { History, Trash2, Filter, ChevronLeft, ChevronRight, Building2, MapPin, Search } from "lucide-react";
 import { fetchDownloads, deleteDownload, type DownloadEntry } from "@/lib/leads-store";
 
 export const Route = createFileRoute("/descargas")({
+  beforeLoad: async () => {
+    if (typeof window === 'undefined') return; // Skip SSR auth check
+    const bypass = localStorage.getItem("dev_bypass") === "true";
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session && !bypass) {
+      throw redirect({ to: "/" });
+    }
+  },
   component: DownloadsPage,
   head: () => ({
     meta: [

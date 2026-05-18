@@ -10,6 +10,7 @@ import {
 
 import appCss from "../styles.css?url";
 import { Navbar } from "../components/Navbar";
+import { AuthProvider } from "../lib/auth-context";
 
 function NotFoundComponent() {
   return (
@@ -117,8 +118,10 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <Navbar />
-      <Outlet />
+      <AuthProvider>
+        <Navbar />
+        <Outlet />
+      </AuthProvider>
     </QueryClientProvider>
   );
 }

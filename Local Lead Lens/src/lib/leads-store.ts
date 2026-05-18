@@ -108,7 +108,7 @@ export async function fetchDownloads(): Promise<DownloadEntry[]> {
     console.error("[downloads] fetch", error);
     return [];
   }
-  return (data ?? []) as DownloadEntry[];
+  return (data ?? []) as unknown as DownloadEntry[];
 }
 
 export async function deleteDownload(id: string) {
