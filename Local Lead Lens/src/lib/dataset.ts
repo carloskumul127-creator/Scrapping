@@ -10,6 +10,7 @@ export type Business = {
   city: string;
   reviewDate?: string | null;
   whatsapp?: boolean;
+  whatsappType?: string | null;
 };
 
 const pickKey = (obj: Record<string, any>, candidates: string[]) => {

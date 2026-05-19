@@ -1,15 +1,40 @@
-import { createClient } from '@supabase/supabase-js';
-
 const supabaseUrl = 'https://lngkslnffxpfiviizaox.supabase.co';
 const supabaseKey = 'sb_publishable_aaVYGIOsANmVvlTQJNy-pg_eXwmaXDh';
-const supabase = createClient(supabaseUrl, supabaseKey);
 
 async function main() {
-  const { data: finalData, error: finalError } = await supabase.from('leads_final').select('*').limit(1);
-  const { data: rawData, error: rawError } = await supabase.from('leads_raw').select('*').limit(1);
+  console.log('Fetching OpenAPI schema from root...');
+  const res = await fetch(`${supabaseUrl}/rest/v1/`, {
+    method: 'GET',
+    headers: {
+      'apikey': supabaseKey,
+      'Authorization': `Bearer ${supabaseKey}`,
+    }
+  });
 
-  console.log('leads_final keys:', finalData ? Object.keys(finalData[0] || {}) : finalError);
-  console.log('leads_raw keys:', rawData ? Object.keys(rawData[0] || {}) : rawError);
+  console.log('Response Status:', res.status, res.statusText);
+  const text = await res.text();
+  console.log('Body length:', text.length);
+  if (text.length > 0) {
+    try {
+      const parsed = JSON.parse(text);
+      console.log('=== Definitions keys ===');
+      console.log(Object.keys(parsed.definitions || {}));
+      
+      if (parsed.definitions) {
+        if (parsed.definitions.leads_raw) {
+          console.log('--- leads_raw properties ---');
+          console.log(Object.keys(parsed.definitions.leads_raw.properties || {}));
+        }
+        if (parsed.definitions.leads_final) {
+          console.log('--- leads_final properties ---');
+          console.log(Object.keys(parsed.definitions.leads_final.properties || {}));
+        }
+      }
+    } catch (e) {
+      console.log('Body is not JSON:', text.substring(0, 500));
+    }
+  }
 }
 
 main();
+

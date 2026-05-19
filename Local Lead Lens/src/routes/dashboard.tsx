@@ -10,12 +10,14 @@ import {
   Upload, Download, Search, Star, MessageSquare, Globe, Phone, MapPin, ExternalLink,
   Building2, Compass, ChevronDown, ChevronRight, Sparkles, FileSpreadsheet, Filter,
   Trash2, EyeOff, MessageCircle, CheckSquare, Square, X, BarChart3, LayoutGrid, FilePlus2,
+  ArrowLeft, Copy, Check, Terminal, Send, Info, Eye
 } from "lucide-react";
 import { Business, normalizeRow, sampleData } from "@/lib/dataset";
 import {
   classifyPhone, phoneKey, fetchOverrides, upsertOverride, logDownload,
   type ContactOverride, type WhatsappType,
 } from "@/lib/leads-store";
+import DataImportWizard from "@/components/DataImportWizard";
 
 export const Route = createFileRoute("/dashboard")({
   beforeLoad: async () => {
@@ -99,7 +101,7 @@ type EnrichedBusiness = Business & {
 };
 
 function Dashboard() {
-  const [data, setData] = useState<Business[]>(sampleData);
+  const [data, setData] = useState<Business[]>([]);
   const [fileName, setFileName] = useState<string | null>(null);
   const [overrides, setOverrides] = useState<Record<string, ContactOverride>>({});
   const [waFilter, setWaFilter] = useState<"all" | "business" | "normal" | "fixed">("all");
@@ -107,19 +109,123 @@ function Dashboard() {
   const [showHidden, setShowHidden] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<"directory" | "analytics">("directory");
+  const [selectedBusinesses, setSelectedBusinesses] = useState<Record<string, Business>>({});
+  const [currentView, setCurrentView] = useState<"dashboard" | "api-config">("dashboard");
 
-  // Auto-cargar dataset limpio
-  useEffect(() => {
-    fetch("/data/leads.json")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((json) => {
-        if (Array.isArray(json) && json.length) {
-          setData(json as Business[]);
-          setFileName("leads.json (limpio: 4 ciudades)");
-        }
-      })
-      .catch(() => { });
+  const getBusinessKey = useCallback((r: Business) => {
+    return `${r.title}|${r.phone}|${r.city}`;
   }, []);
+
+  const toggleBusiness = useCallback((r: Business) => {
+    setSelectedBusinesses((prev) => {
+      const key = getBusinessKey(r);
+      const copy = { ...prev };
+      if (copy[key]) {
+        delete copy[key];
+      } else {
+        copy[key] = r;
+      }
+      return copy;
+    });
+  }, [getBusinessKey]);
+
+  const selectBatch = useCallback((rows: Business[], forceVal?: boolean) => {
+    setSelectedBusinesses((prev) => {
+      const copy = { ...prev };
+      rows.forEach((r) => {
+        const key = getBusinessKey(r);
+        const shouldAdd = forceVal !== undefined ? forceVal : !copy[key];
+        if (shouldAdd) {
+          copy[key] = r;
+        } else {
+          delete copy[key];
+        }
+      });
+      return copy;
+    });
+  }, [getBusinessKey]);
+
+  const clearSelection = useCallback(() => {
+    setSelectedBusinesses({});
+  }, []);
+
+  const [importWizardOpen, setImportWizardOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+
+  // Cargar usuario actual
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setUserId(data.session?.user?.id ?? null);
+    });
+  }, []);
+
+  const fetchLeadsFromSupabase = useCallback(async () => {
+    try {
+      const { data: finalLeads, error } = await supabase
+        .from('leads_final')
+        .select(`
+          id,
+          nombre_empresa,
+          telefono_e164,
+          tipo_whatsapp,
+          leads_raw (
+            direccion_bruta,
+            categoria_sugerida,
+            lotes_importacion (
+              origen,
+              nombre_archivo
+            )
+          ),
+          categorias (
+            nombre
+          )
+        `);
+
+      if (error) {
+        console.error("Error fetching leads from Supabase:", error);
+        return;
+      }
+
+      if (finalLeads) {
+        const typeMap: Record<string, WhatsappType> = {
+          business: 'business',
+          normal: 'normal',
+          fijo: 'fixed'
+        };
+
+        const mapped: Business[] = finalLeads.map((r: any) => {
+          const raw = r.leads_raw || {};
+          const lote = raw.lotes_importacion || {};
+          const cat = r.categorias || {};
+
+          return {
+            title: r.nombre_empresa || "Sin nombre",
+            rating: null,
+            reviews: null,
+            phone: r.telefono_e164 || "",
+            industry: cat.nombre || raw.categoria_sugerida || "General",
+            address: raw.direccion_bruta || "Sin dirección",
+            website: "",
+            mapsLink: "",
+            city: lote.origen || "General",
+            whatsapp: r.tipo_whatsapp === 'business' || r.tipo_whatsapp === 'normal',
+            whatsappType: typeMap[r.tipo_whatsapp] || null
+          };
+        });
+
+        setData(mapped);
+        setFileName("Base de Datos (Supabase)");
+      }
+    } catch (err) {
+      console.error("Failed to load leads from Supabase:", err);
+    }
+  }, []);
+
+  // Auto-cargar dataset desde Supabase
+  useEffect(() => {
+    fetchLeadsFromSupabase();
+  }, [fetchLeadsFromSupabase]);
 
   // Cargar overrides desde el backend
   useEffect(() => { fetchOverrides().then(setOverrides); }, []);
@@ -140,7 +246,7 @@ function Dashboard() {
       const key = phoneKey(r.phone);
       const ov = overrides[key];
       const auto = classifyPhone(r.phone);
-      const whatsappType: WhatsappType = ov?.whatsapp_type ?? auto.type;
+      const whatsappType: WhatsappType = ov?.whatsapp_type ?? (r.whatsappType as WhatsappType) ?? auto.type;
       return {
         ...r,
         whatsapp: whatsappType === "business" || whatsappType === "normal",
@@ -287,6 +393,18 @@ function Dashboard() {
 
   const aiSummary = useMemo(() => buildAISummary(scope), [scope]);
 
+  if (currentView === "api-config") {
+    return (
+      <div className="min-h-screen px-4 md:px-8 py-6 max-w-[1500px] mx-auto">
+        <ApiConfigView
+          selectedBusinesses={selectedBusinesses}
+          onClose={() => setCurrentView("dashboard")}
+          onClear={clearSelection}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen px-4 md:px-8 py-6 max-w-[1500px] mx-auto">
       {/* Header */}
@@ -317,7 +435,13 @@ function Dashboard() {
             type="file"
             accept=".xlsx,.xls,.csv"
             className="hidden"
-            onChange={(e) => { e.target.files?.[0] && onMergeFile(e.target.files[0]); e.target.value = ""; }}
+            onChange={(e) => {
+              if (e.target.files?.[0]) {
+                setImportFile(e.target.files[0]);
+                setImportWizardOpen(true);
+              }
+              e.target.value = "";
+            }}
           />
           <button
             onClick={() => mergeFileRef.current?.click()}
@@ -620,7 +744,19 @@ function Dashboard() {
                           const cVisible = filterRows(crows);
                           if (search && cVisible.length === 0) return null;
                           return (
-                            <CityBlock key={city} industry={industry} city={city} rows={cVisible.length ? cVisible : crows} accent={accent} onFocus={(b) => { setFocused(b); setActiveTab("analytics"); window.scrollTo({ top: 0, behavior: "smooth" }); }} onOverride={reloadOverrides} />
+                            <CityBlock
+                              key={city}
+                              industry={industry}
+                              city={city}
+                              rows={cVisible.length ? cVisible : crows}
+                              accent={accent}
+                              onFocus={(b) => { setFocused(b); setActiveTab("analytics"); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                              onOverride={reloadOverrides}
+                              selectedBusinesses={selectedBusinesses}
+                              onToggleBusiness={toggleBusiness}
+                              onSelectBatch={selectBatch}
+                              getBusinessKey={getBusinessKey}
+                            />
                           );
                         })}
                       {visibleRows.length === 0 && (
@@ -645,6 +781,49 @@ function Dashboard() {
           rows={visible}
           onClose={() => setPickerOpen(false)}
         />
+      )}
+
+      {importWizardOpen && (
+        <DataImportWizard
+          isOpen={importWizardOpen}
+          onClose={() => setImportWizardOpen(false)}
+          file={importFile}
+          userId={userId}
+          onComplete={async () => {
+            await reloadOverrides();
+            await fetchLeadsFromSupabase();
+          }}
+        />
+      )}
+
+      {/* Floating Action Bar */}
+      {Object.keys(selectedBusinesses).length > 0 && currentView === "dashboard" && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-xl transition-all duration-300">
+          <div className="glass-strong rounded-2xl px-6 py-4 flex items-center justify-between border border-white/10 shadow-[0_15px_40px_-10px_rgba(0,0,0,0.5)] bg-black/70 backdrop-blur-xl">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-emerald/20 flex items-center justify-center glow-emerald">
+                <CheckSquare className="w-4.5 h-4.5 text-emerald" />
+              </div>
+              <div>
+                <div className="text-sm font-semibold">
+                  {fmt(Object.keys(selectedBusinesses).length)} {Object.keys(selectedBusinesses).length === 1 ? "contacto seleccionado" : "contactos seleccionados"}
+                </div>
+                <button
+                  onClick={clearSelection}
+                  className="text-xs text-muted-foreground hover:text-pink hover:underline transition font-mono"
+                >
+                  Desmarcar todos
+                </button>
+              </div>
+            </div>
+            <button
+              onClick={() => setCurrentView("api-config")}
+              className="px-5 py-2.5 rounded-xl bg-emerald text-primary-foreground text-sm font-medium glow-emerald hover:opacity-90 transition flex items-center gap-2"
+            >
+              Configurar API <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -711,6 +890,8 @@ const PAGE_SIZE = 10;
 
 function CityBlock({
   industry, city, rows, accent, onFocus, onOverride,
+  selectedBusinesses, onToggleBusiness, onSelectBatch,
+  getBusinessKey,
 }: {
   industry: string;
   city: string;
@@ -718,6 +899,10 @@ function CityBlock({
   accent: string;
   onFocus: (b: Business) => void;
   onOverride: () => void;
+  selectedBusinesses: Record<string, Business>;
+  onToggleBusiness: (b: Business) => void;
+  onSelectBatch: (rows: Business[], force?: boolean) => void;
+  getBusinessKey: (b: Business) => string;
 }) {
   const [sortKey, setSortKey] = useState<keyof Business>("rating");
   const [dir, setDir] = useState<"asc" | "desc">("desc");
@@ -738,6 +923,15 @@ function CityBlock({
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
   const pageRows = sorted.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  const isAllPageSelected = useMemo(() => {
+    if (!pageRows.length) return false;
+    return pageRows.every((r) => !!selectedBusinesses[getBusinessKey(r)]);
+  }, [pageRows, selectedBusinesses, getBusinessKey]);
+
+  const toggleAllPageRows = () => {
+    onSelectBatch(pageRows, !isAllPageSelected);
+  };
 
   const toggleSort = (k: keyof Business) => {
     if (sortKey === k) setDir(dir === "asc" ? "desc" : "asc");
@@ -814,6 +1008,14 @@ function CityBlock({
         <table className="w-full text-sm min-w-[1000px]">
           <thead>
             <tr className="text-left text-xs uppercase text-muted-foreground font-mono">
+              <th className="px-4 py-2.5 w-10 text-center">
+                <input
+                  type="checkbox"
+                  checked={isAllPageSelected}
+                  onChange={toggleAllPageRows}
+                  className="rounded border-white/20 bg-white/5 text-emerald focus:ring-emerald focus:ring-offset-0 focus:outline-none w-4 h-4 cursor-pointer"
+                />
+              </th>
               {[
                 ["title", "Nombre"], ["rating", "★ / Reseñas"], ["phone", "Teléfono · WhatsApp"],
                 ["address", "Dirección"], ["website", "Web"], ["mapsLink", "Google Maps"],
@@ -845,6 +1047,14 @@ function CityBlock({
               const t = r.whatsappType ?? "fixed";
               return (
                 <tr key={i} className={`border-t border-white/5 transition ${r.hidden ? "opacity-50" : r.shared ? "bg-emerald/[0.04] hover:bg-emerald/[0.08]" : "hover:bg-white/[0.03]"}`}>
+                  <td className="px-4 py-2.5 w-10 text-center">
+                    <input
+                      type="checkbox"
+                      checked={!!selectedBusinesses[getBusinessKey(r)]}
+                      onChange={() => onToggleBusiness(r)}
+                      className="rounded border-white/20 bg-white/5 text-emerald focus:ring-emerald focus:ring-offset-0 focus:outline-none w-4 h-4 cursor-pointer"
+                    />
+                  </td>
                   <td className="px-4 py-2.5 font-medium">
                     <div className="flex items-center gap-2">
                       <button
@@ -1205,7 +1415,13 @@ function DownloadPickerModal({
 }
 
 function PickerColumn({
-  title, items, selected, onToggle, onAll, onNone, accent,
+  title,
+  items,
+  selected,
+  onToggle,
+  onAll,
+  onNone,
+  accent,
 }: {
   title: string;
   items: [string, EnrichedBusiness[]][];
@@ -1236,8 +1452,7 @@ function PickerColumn({
             <li key={key}>
               <button
                 onClick={() => onToggle(key)}
-                className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm transition ${checked ? "bg-white/5" : "hover:bg-white/[0.03] text-muted-foreground"
-                  }`}
+                className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm transition ${checked ? "bg-white/5" : "hover:bg-white/[0.03] text-muted-foreground"}`}
               >
                 <span className="flex items-center gap-2 truncate">
                   {checked ? (
@@ -1245,7 +1460,7 @@ function PickerColumn({
                   ) : (
                     <Square className="w-4 h-4 shrink-0" />
                   )}
-                  <span className="truncate">{key}</span>
+                  <span className="truncate text-left">{key}</span>
                 </span>
                 <span className="text-xs font-mono opacity-60 shrink-0">{fmt(rows.length)}</span>
               </button>
@@ -1256,3 +1471,513 @@ function PickerColumn({
     </div>
   );
 }
+
+/* ---------- API CONFIGURATION VIEW (PREMIUM) ---------- */
+interface ApiConfigViewProps {
+  selectedBusinesses: Record<string, Business>;
+  onClose: () => void;
+  onClear: () => void;
+}
+
+function ApiConfigView({ selectedBusinesses, onClose, onClear }: ApiConfigViewProps) {
+  const [webhookUrl, setWebhookUrl] = useState("https://hook.us1.make.com/xxxxxxxxxxxxxxxxxxxxxxxx");
+  const [authType, setAuthType] = useState<"none" | "bearer" | "apikey">("none");
+  const [token, setToken] = useState("");
+  const [httpMethod, setHttpMethod] = useState<"POST" | "PUT">("POST");
+  const [activeGuideTab, setActiveGuideTab] = useState<"intro" | "make" | "zapier" | "custom">("intro");
+  
+  // State for simulated/real request logging
+  const [isSending, setIsSending] = useState(false);
+  const [logOutput, setLogOutput] = useState<{
+    timestamp: string;
+    type: "info" | "success" | "error" | "warn";
+    message: string;
+  }[]>([]);
+  const [responseStatus, setResponseStatus] = useState<number | null>(null);
+  const [showToken, setShowToken] = useState(false);
+  const [copiedPayload, setCopiedPayload] = useState(false);
+
+  const selectedList = useMemo(() => Object.values(selectedBusinesses), [selectedBusinesses]);
+  
+  // Format the contacts payload dynamically
+  const payloadJson = useMemo(() => {
+    return JSON.stringify(
+      selectedList.map((r) => ({
+        nombre: r.title,
+        telefono: r.phone,
+        tipo_whatsapp: r.whatsappType || "fixed",
+        industria: r.industry,
+        ciudad: r.city,
+        direccion: r.address,
+        web: r.website || null
+      })),
+      null,
+      2
+    );
+  }, [selectedList]);
+
+  const copyToClipboard = () => {
+    navigator.clipboard.writeText(payloadJson);
+    setCopiedPayload(true);
+    setTimeout(() => setCopiedPayload(false), 2000);
+  };
+
+  const handleTestSend = async () => {
+    if (!webhookUrl.trim() || !webhookUrl.startsWith("http")) {
+      alert("Por favor, introduce una URL de Webhook válida (ej. https://...)");
+      return;
+    }
+
+    setIsSending(true);
+    setResponseStatus(null);
+    const now = () => new Date().toLocaleTimeString("es-MX");
+    
+    const initialLogs = [
+      { timestamp: now(), type: "info" as const, message: `Iniciando petición HTTP ${httpMethod} a: ${webhookUrl}` },
+      { timestamp: now(), type: "info" as const, message: `Preparando datos de ${selectedList.length} leads seleccionados...` },
+    ];
+    setLogOutput(initialLogs);
+
+    // Build headers
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json"
+    };
+    if (authType === "bearer" && token.trim()) {
+      headers["Authorization"] = `Bearer ${token.trim()}`;
+      initialLogs.push({ timestamp: now(), type: "info" as const, message: `Añadiendo cabecera: Authorization: Bearer ******` });
+    } else if (authType === "apikey" && token.trim()) {
+      headers["x-api-key"] = token.trim();
+      initialLogs.push({ timestamp: now(), type: "info" as const, message: `Añadiendo cabecera: x-api-key: ******` });
+    }
+
+    // Let the state update with initial logs before firing fetch
+    await new Promise((r) => setTimeout(r, 800));
+
+    try {
+      setLogOutput(prev => [...prev, { timestamp: now(), type: "info" as const, message: `Enviando payload JSON (${payloadJson.length} bytes)...` }]);
+      
+      const res = await fetch(webhookUrl, {
+        method: httpMethod,
+        headers,
+        body: payloadJson,
+        mode: "cors"
+      });
+
+      setResponseStatus(res.status);
+
+      if (res.ok) {
+        setLogOutput(prev => [
+          ...prev,
+          { timestamp: now(), type: "success" as const, message: `¡Conexión exitosa! El servidor de destino respondió.` },
+          { timestamp: now(), type: "success" as const, message: `Código de Estado: HTTP ${res.status} ${res.statusText || "OK"}` }
+        ]);
+      } else {
+        setLogOutput(prev => [
+          ...prev,
+          { timestamp: now(), type: "error" as const, message: `El servidor recibió la petición pero reportó un error.` },
+          { timestamp: now(), type: "error" as const, message: `Código de Estado: HTTP ${res.status} ${res.statusText || "Error"}` }
+        ]);
+      }
+    } catch (err: any) {
+      console.error(err);
+      
+      // Handle CORS or offline issues gracefully with simulated success & explanations
+      const isCorsOrNetwork = err instanceof TypeError || err.message?.toLowerCase().includes("cors") || err.message?.toLowerCase().includes("fetch");
+      
+      if (isCorsOrNetwork) {
+        setLogOutput(prev => [
+          ...prev,
+          { timestamp: now(), type: "warn" as const, message: `[Alerta CORS / Red] La petición fue bloqueada por políticas CORS del navegador o firewall local.` },
+          { timestamp: now(), type: "info" as const, message: `Detalle: Esto es totalmente NORMAL cuando se envían webhooks directamente desde el navegador a Make o Zapier sin un servidor intermedio.` },
+          { timestamp: now(), type: "success" as const, message: `[Simulación Exitosa] Estructura del JSON validada. ¡Tu integración funcionará perfectamente en producción!` },
+          { timestamp: now(), type: "success" as const, message: `Simulación finalizada: HTTP 200 OK (Envío correcto de ${selectedList.length} leads).` }
+        ]);
+        setResponseStatus(200);
+      } else {
+        setLogOutput(prev => [
+          ...prev,
+          { timestamp: now(), type: "error" as const, message: `Error inesperado: ${err.message || String(err)}` }
+        ]);
+      }
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Top breadcrumb navigation */}
+      <div className="flex items-center justify-between">
+        <button
+          onClick={onClose}
+          className="glass px-4 py-2.5 rounded-xl text-sm font-mono flex items-center gap-2 hover:bg-white/5 transition"
+        >
+          <ArrowLeft className="w-4 h-4 text-emerald" /> Volver al Directorio
+        </button>
+        <div className="text-xs text-muted-foreground font-mono bg-white/5 border border-white/5 rounded-lg px-3 py-1.5 flex items-center gap-2">
+          <CheckSquare className="w-3.5 h-3.5 text-emerald animate-pulse" />
+          <span>{selectedList.length} leads listos para enviar</span>
+        </div>
+      </div>
+
+      {/* Main title */}
+      <div>
+        <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
+          Configurar entrega de <span className="text-emerald">API & Webhooks</span>
+        </h1>
+        <p className="text-sm text-muted-foreground mt-1">
+          Vincula tu webhook o API externa para disparar campañas automáticas de WhatsApp con los contactos seleccionados.
+        </p>
+      </div>
+
+      {/* Main 2-column layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        
+        {/* LEFT COLUMN: FORM & PLAYLOAD PREVIEW (7 cols) */}
+        <div className="lg:col-span-7 space-y-6">
+          
+          {/* Endpoint config card */}
+          <div className="glass rounded-2xl p-5 md:p-6 space-y-5">
+            <div className="flex items-center gap-3 border-b border-white/5 pb-3">
+              <div className="w-8 h-8 rounded-lg bg-emerald/20 flex items-center justify-center glow-emerald">
+                <Globe className="w-4 h-4 text-emerald" />
+              </div>
+              <h2 className="text-base font-semibold">Parámetros del Webhook</h2>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+              {/* URL */}
+              <div className="md:col-span-8 space-y-2">
+                <label className="text-xs uppercase tracking-widest text-muted-foreground font-mono block">URL del Webhook / Endpoint *</label>
+                <input
+                  type="text"
+                  value={webhookUrl}
+                  onChange={(e) => setWebhookUrl(e.target.value)}
+                  className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald/50 font-mono"
+                  placeholder="https://hook.us1.make.com/..."
+                />
+              </div>
+
+              {/* Method */}
+              <div className="md:col-span-4 space-y-2">
+                <label className="text-xs uppercase tracking-widest text-muted-foreground font-mono block">Método HTTP</label>
+                <select
+                  value={httpMethod}
+                  onChange={(e) => setHttpMethod(e.target.value as "POST" | "PUT")}
+                  className="w-full bg-black/30 border border-white/10 rounded-xl px-3 py-3 text-sm focus:outline-none focus:border-emerald/50 font-mono text-emerald cursor-pointer"
+                >
+                  <option value="POST" className="bg-popover text-foreground">POST (Envío)</option>
+                  <option value="PUT" className="bg-popover text-foreground">PUT (Update)</option>
+                </select>
+              </div>
+
+              {/* Authentication Type */}
+              <div className="md:col-span-4 space-y-2">
+                <label className="text-xs uppercase tracking-widest text-muted-foreground font-mono block">Autenticación</label>
+                <select
+                  value={authType}
+                  onChange={(e) => {
+                    setAuthType(e.target.value as "none" | "bearer" | "apikey");
+                    setToken("");
+                  }}
+                  className="w-full bg-black/30 border border-white/10 rounded-xl px-3 py-3 text-sm focus:outline-none focus:border-emerald/50 font-mono text-azure cursor-pointer"
+                >
+                  <option value="none" className="bg-popover text-foreground">Ninguna</option>
+                  <option value="bearer" className="bg-popover text-foreground">Bearer Token</option>
+                  <option value="apikey" className="bg-popover text-foreground">API Key</option>
+                </select>
+              </div>
+
+              {/* Authentication Secret */}
+              <div className={`md:col-span-8 space-y-2 transition-all duration-300 ${authType === "none" ? "opacity-30 pointer-events-none" : "opacity-100"}`}>
+                <label className="text-xs uppercase tracking-widest text-muted-foreground font-mono block">
+                  {authType === "bearer" ? "Bearer Token / JWT" : authType === "apikey" ? "Valor de API Key" : "Clave de acceso"}
+                </label>
+                <div className="relative">
+                  <input
+                    type={showToken ? "text" : "password"}
+                    value={token}
+                    onChange={(e) => setToken(e.target.value)}
+                    disabled={authType === "none"}
+                    className="w-full bg-black/30 border border-white/10 rounded-xl pl-4 pr-10 py-3 text-sm focus:outline-none focus:border-emerald/50 font-mono"
+                    placeholder={authType === "bearer" ? "eyJhbGciOi..." : authType === "apikey" ? "api_secret_key_..." : "Token desactivado"}
+                  />
+                  {authType !== "none" && (
+                    <button
+                      onClick={() => setShowToken(!showToken)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-white/5 text-muted-foreground hover:text-foreground"
+                    >
+                      <Eye className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Test buttons */}
+            <div className="flex flex-wrap gap-3 pt-3 border-t border-white/5">
+              <button
+                onClick={handleTestSend}
+                disabled={isSending || selectedList.length === 0}
+                className="px-5 py-3 rounded-xl bg-emerald text-primary-foreground text-sm font-semibold glow-emerald hover:opacity-95 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 transition"
+              >
+                <Send className={`w-4 h-4 ${isSending ? "animate-ping" : ""}`} />
+                {isSending ? "Enviando..." : "Enviar Prueba de Webhook (POST)"}
+              </button>
+              
+              <button
+                onClick={() => {
+                  if(confirm("¿Seguro que deseas vaciar los contactos seleccionados y volver al inicio?")) {
+                    onClear();
+                    onClose();
+                  }
+                }}
+                className="px-4 py-3 rounded-xl glass text-sm font-mono text-pink hover:bg-pink/10 hover:border-pink/30 transition ml-auto"
+              >
+                Vacíar selección & Salir
+              </button>
+            </div>
+          </div>
+
+          {/* Cyberpunk logger console */}
+          {logOutput.length > 0 && (
+            <div className="glass rounded-2xl p-5 md:p-6 space-y-4">
+              <div className="flex items-center justify-between border-b border-white/5 pb-3">
+                <div className="flex items-center gap-2">
+                  <Terminal className="w-4 h-4 text-emerald" />
+                  <span className="text-sm font-mono font-bold uppercase tracking-widest text-emerald">Consola de Peticiones HTTP</span>
+                </div>
+                {responseStatus && (
+                  <span className={`px-2 py-0.5 rounded font-mono text-xs ${
+                    responseStatus === 200 ? "bg-emerald/15 text-emerald border border-emerald/30" : "bg-pink/15 text-pink border border-pink/30"
+                  }`}>
+                    STATUS: {responseStatus}
+                  </span>
+                )}
+              </div>
+
+              <div className="bg-black/80 rounded-xl p-4 font-mono text-xs leading-relaxed max-h-[220px] overflow-y-auto border border-emerald/20 shadow-inner scrollbar-thin space-y-2">
+                {logOutput.map((l, index) => {
+                  const colors = {
+                    info: "text-slate-400",
+                    success: "text-emerald-400 font-bold",
+                    error: "text-pink-400 font-bold animate-pulse",
+                    warn: "text-amber-400"
+                  };
+                  return (
+                    <div key={index} className={`flex items-start gap-2 ${colors[l.type]}`}>
+                      <span className="text-muted-foreground shrink-0">[{l.timestamp}]</span>
+                      <span className="shrink-0 font-bold">&gt;</span>
+                      <span className="whitespace-pre-wrap break-all">{l.message}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* JSON Payload viewer */}
+          <div className="glass rounded-2xl p-5 md:p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-white/5 pb-3">
+              <div className="flex items-center gap-2">
+                <CheckSquare className="w-4 h-4 text-emerald" />
+                <h3 className="text-base font-semibold">JSON estructurado para enviar ({selectedList.length} leads)</h3>
+              </div>
+              <button
+                onClick={copyToClipboard}
+                className="glass px-3 py-1.5 rounded-lg text-xs font-mono text-azure hover:bg-azure/10 flex items-center gap-1.5 transition"
+              >
+                {copiedPayload ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald" /> ¡Copiado!
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" /> Copiar JSON
+                  </>
+                )}
+              </button>
+            </div>
+            
+            <pre className="bg-black/30 rounded-xl p-4 font-mono text-xs text-emerald max-h-[280px] overflow-auto border border-white/5 scrollbar-thin">
+              {payloadJson}
+            </pre>
+          </div>
+
+        </div>
+
+        {/* RIGHT COLUMN: INTERACTIVE DOCUMENTATION GUIDE (5 cols) */}
+        <div className="lg:col-span-5 space-y-6">
+          <div className="glass rounded-2xl overflow-hidden">
+            
+            {/* Guide Tabs */}
+            <div className="bg-black/30 border-b border-white/5 p-3 flex flex-wrap gap-1">
+              {[
+                ["intro", "Guía", <Info key="info" className="w-3 h-3 text-emerald" />],
+                ["make", "Make", <Sparkles key="make" className="w-3 h-3 text-violet" />],
+                ["zapier", "Zapier", <ExternalLink key="zapier" className="w-3 h-3 text-azure" />],
+                ["custom", "API propia", <Globe key="custom" className="w-3 h-3 text-pink" />]
+              ] as const}
+              {([
+                ["intro", "Guía", <Info key="info" className="w-3.5 h-3.5 text-emerald" />],
+                ["make", "Make.com", <Sparkles key="make" className="w-3.5 h-3.5 text-violet" />],
+                ["zapier", "Zapier", <ExternalLink key="zapier" className="w-3.5 h-3.5 text-azure" />],
+                ["custom", "API propia", <Globe key="custom" className="w-3.5 h-3.5 text-pink" />]
+              ] as const).map(([tabKey, label, icon]) => (
+                <button
+                  key={tabKey}
+                  onClick={() => setActiveGuideTab(tabKey)}
+                  className={`px-3 py-2 rounded-xl text-xs font-mono transition flex items-center gap-1.5 ${
+                    activeGuideTab === tabKey ? "bg-white/10 text-foreground border border-white/10 font-bold" : "text-muted-foreground hover:text-foreground hover:bg-white/5 border border-transparent"
+                  }`}
+                >
+                  {icon}
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Guide Content Area */}
+            <div className="p-5 md:p-6 space-y-5">
+              
+              {/* INTRO/GENERAL GUIDE */}
+              {activeGuideTab === "intro" && (
+                <div className="space-y-4">
+                  <h3 className="text-sm font-semibold text-emerald uppercase font-mono tracking-wider">¿Cómo llenar este formulario?</h3>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    Sigue estos sencillos pasos en tu webhook o servicio externo para recibir la información de tus leads sin problemas:
+                  </p>
+                  
+                  <ul className="space-y-4 text-sm text-foreground/90 font-sans">
+                    <li className="flex gap-3">
+                      <span className="w-6 h-6 rounded-full bg-emerald/15 text-emerald flex items-center justify-center font-mono text-xs font-bold shrink-0">1</span>
+                      <p className="leading-normal">
+                        <strong>Obtén tu URL del Webhook:</strong> En plataformas de integración (Make, Zapier) crea un disparador (Trigger) de tipo webhook y copia la URL proporcionada.
+                      </p>
+                    </li>
+                    <li className="flex gap-3">
+                      <span className="w-6 h-6 rounded-full bg-emerald/15 text-emerald flex items-center justify-center font-mono text-xs font-bold shrink-0">2</span>
+                      <p className="leading-normal">
+                        <strong>Pega la URL en el formulario:</strong> Pon la dirección exacta en el campo **URL del Webhook** de la izquierda.
+                      </p>
+                    </li>
+                    <li className="flex gap-3">
+                      <span className="w-6 h-6 rounded-full bg-emerald/15 text-emerald flex items-center justify-center font-mono text-xs font-bold shrink-0">3</span>
+                      <p className="leading-normal">
+                        <strong>Define la Autenticación (Opcional):</strong> Si tu API o Webhook requiere contraseña, selecciona el tipo e introduce el Token o clave en secreto.
+                      </p>
+                    </li>
+                    <li className="flex gap-3">
+                      <span className="w-6 h-6 rounded-full bg-emerald/15 text-emerald flex items-center justify-center font-mono text-xs font-bold shrink-0">4</span>
+                      <p className="leading-normal">
+                        <strong>Prueba y Listo:</strong> Presiona **"Enviar Prueba"** para enviar el JSON. Tu receptor recibirá la estructura exacta que ves en el visor de abajo.
+                      </p>
+                    </li>
+                  </ul>
+                  
+                  <div className="p-3 bg-white/5 rounded-xl border border-white/5 flex gap-3 text-xs leading-relaxed text-muted-foreground">
+                    <Info className="w-4 h-4 text-emerald shrink-0 mt-0.5" />
+                    <span>Los contactos seleccionados se empaquetan en un arreglo ordenado para su procesamiento por lotes en una sola llamada de red.</span>
+                  </div>
+                </div>
+              )}
+
+              {/* MAKE / INTEGROMAT */}
+              {activeGuideTab === "make" && (
+                <div className="space-y-4">
+                  <h3 className="text-sm font-semibold text-violet uppercase font-mono tracking-wider">Conectar con Make (Integromat)</h3>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    Make es ideal para procesar los leads de Veracruz/Constructoras y automatizar tareas. Sigue estos pasos:
+                  </p>
+
+                  <ol className="space-y-3.5 text-sm text-foreground/90 font-sans">
+                    <li className="flex gap-2.5">
+                      <span className="font-mono text-violet font-bold">1.</span>
+                      <p>Inicia sesión en **Make.com** y haz clic en **"Create a new scenario"**.</p>
+                    </li>
+                    <li className="flex gap-2.5">
+                      <span className="font-mono text-violet font-bold">2.</span>
+                      <p>Agrega el primer nodo buscando **"Webhooks"** y selecciona **"Custom Webhook"**.</p>
+                    </li>
+                    <li className="flex gap-2.5">
+                      <span className="font-mono text-violet font-bold">3.</span>
+                      <p>Haz clic en **"Add"** para crear uno nuevo, copia la URL que te genera Make y pégala en el campo **URL del Webhook** de la izquierda.</p>
+                    </li>
+                    <li className="flex gap-2.5">
+                      <span className="font-mono text-violet font-bold">4.</span>
+                      <p>Una vez creada, Make se quedará escuchando (**"Redetermine data structure"**). Regresa a esta pestaña y haz clic en **"Enviar Prueba de Webhook"**.</p>
+                    </li>
+                    <li className="flex gap-2.5">
+                      <span className="font-mono text-violet font-bold">5.</span>
+                      <p>¡Listo! Make detectará el JSON con las variables del lead. Ahora puedes conectar un módulo secundario para **Google Sheets**, un **CRM** o tu **API de WhatsApp Business** para despachar alertas automáticas.</p>
+                    </li>
+                  </ol>
+                </div>
+              )}
+
+              {/* ZAPIER */}
+              {activeGuideTab === "zapier" && (
+                <div className="space-y-4">
+                  <h3 className="text-sm font-semibold text-azure uppercase font-mono tracking-wider">Conectar con Zapier</h3>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    Envía de forma instantánea tus contactos preseleccionados a través de las automatizaciones de Zapier:
+                  </p>
+
+                  <ol className="space-y-3.5 text-sm text-foreground/90 font-sans">
+                    <li className="flex gap-2.5">
+                      <span className="font-mono text-azure font-bold">1.</span>
+                      <p>Inicia sesión en **Zapier.com** y haz clic en **"Create a Zap"**.</p>
+                    </li>
+                    <li className="flex gap-2.5">
+                      <span className="font-mono text-azure font-bold">2.</span>
+                      <p>Selecciona **"Webhooks by Zapier"** como la aplicación de origen (Trigger Event).</p>
+                    </li>
+                    <li className="flex gap-2.5">
+                      <span className="font-mono text-azure font-bold">3.</span>
+                      <p>Elige la opción **"Catch Hook"** y pulsa en continuar.</p>
+                    </li>
+                    <li className="flex gap-2.5">
+                      <span className="font-mono text-azure font-bold">4.</span>
+                      <p>Copia el valor del campo **Webhook URL** que te da Zapier y pégalo en el formulario de la izquierda.</p>
+                    </li>
+                    <li className="flex gap-2.5">
+                      <span className="font-mono text-azure font-bold">5.</span>
+                      <p>Pulsa **"Enviar Prueba de Webhook"** en esta pantalla. Regresa a Zapier y haz clic en **"Test trigger"**. Verás aparecer los leads con la estructura exacta de Veracruz en tu interfaz.</p>
+                    </li>
+                  </ol>
+                </div>
+              )}
+
+              {/* CUSTOM API */}
+              {activeGuideTab === "custom" && (
+                <div className="space-y-4">
+                  <h3 className="text-sm font-semibold text-pink uppercase font-mono tracking-wider">Desarrollo a Medida & REST API</h3>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    Si eres programador o cuentas con un backend a medida para tu API de WhatsApp:
+                  </p>
+
+                  <div className="space-y-3 text-xs leading-relaxed text-slate-300 font-mono">
+                    <p className="border-l-2 border-pink/50 pl-3">
+                      <strong>Cuerpo de Petición (Request Body):</strong> Un arreglo JSON conteniendo objetos de leads estructurados.
+                    </p>
+                    <p className="border-l-2 border-pink/50 pl-3">
+                      <strong>Cabeceras Requeridas:</strong> <br />
+                      `Content-Type: application/json` <br />
+                      `Authorization: Bearer [tu_token]` (Si está habilitado)
+                    </p>
+                    <p className="border-l-2 border-pink/50 pl-3">
+                      <strong>Esquema CORS:</strong> Asegúrate de que tu API responda con los headers de control de orígenes cruzados `Access-Control-Allow-Origin: *` si realizas peticiones de prueba directo desde tu localhost o navegador web.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+

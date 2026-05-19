@@ -4,14 +4,14 @@
 //   import { importarLote } from '@/integrations/supabase/importarLote'
 //
 //   const resultado = await importarLote({
-//     archivo: archivoCSV,       // File object del <input type="file">
+//     archivo: archivoCSV,
 //     nombreLote: 'Merida_constructoras_2025-05',
 //     ciudad: 'Mérida',
 //     usuarioId: session.user.id,
 //   })
 
 import Papa from 'papaparse'
-import { supabase } from './client' // tu cliente supabase ya existente
+import { supabase } from './client'
 
 // ─── Tipos ────────────────────────────────────────────────────────────────────
 
@@ -19,17 +19,17 @@ interface OpcionesImportar {
   archivo: File
   nombreLote: string
   ciudad: string
-  usuarioId: string
+  usuarioId: string | null
 }
 
 interface ResultadoImportar {
   loteId: string
   totalInsertados: number
-  totalIgnorados: number  // filas sin teléfono
+  totalIgnorados: number
   errores: string[]
+  advertencias: string[]  // filas con datos parciales que igual se insertaron
 }
 
-// Así viene cada fila de TU CSV de Google Maps
 interface FilaCSV {
   'Google maps href': string
   empresa_nombre_bruto: string
@@ -41,104 +41,180 @@ interface FilaCSV {
   telefono_bruto: string
 }
 
-// Así espera la tabla leads_raw en Supabase
 interface LeadRawInsert {
   lote_id: string
-  empresa_nombre_bruto: string | null
-  telefono_bruto: string | null
+  empresa_nombre_bruto: string
+  telefono_bruto: string
   categoria_sugerida: string | null
   direccion_bruta: string | null
   procesado: boolean
+  status: boolean               // false = pendiente, true = limpio/validado
 }
+
+// Cache local para no consultar la misma categoría múltiples veces en el mismo lote
+const cacheCategoriasId = new Map<string, string>()
 
 // ─── Función principal ────────────────────────────────────────────────────────
 
 export async function importarLote(opciones: OpcionesImportar): Promise<ResultadoImportar> {
   const { archivo, nombreLote, ciudad, usuarioId } = opciones
   const errores: string[] = []
+  const advertencias: string[] = []
+
+  // Limpiar cache al inicio de cada importación
+  cacheCategoriasId.clear()
 
   // ── PASO 1: Crear el lote en lotes_importacion ──────────────────────────────
-  const { data: lote, error: errorLote } = await supabase
-    .from('lotes_importacion')
+  const { data, error: errorLote } = await (supabase.from('lotes_importacion') as any)
     .insert({
-      nombre: nombreLote,
-      ciudad,
-      creado_por: usuarioId,
-      total_registros: 0, // se actualiza al final
+      nombre_archivo: nombreLote,
+      origen: ciudad,
+      total_registros: 0,
+      usuario_id: usuarioId || null,
     })
-    .select('id')
+    .select('identificacion')
     .single()
+
+  const lote = data as any
 
   if (errorLote || !lote) {
     throw new Error(`No se pudo crear el lote: ${errorLote?.message}`)
   }
 
-  const loteId = (lote as any).id
+  const loteId = lote.identificacion
 
   // ── PASO 2: Parsear el CSV ──────────────────────────────────────────────────
   const filas = await parsearCSV(archivo)
 
-  // ── PASO 3: Mapear y filtrar filas ─────────────────────────────────────────
+  // ── PASO 3: Validar y mapear filas ─────────────────────────────────────────
   const leadsParaInsertar: LeadRawInsert[] = []
   let totalIgnorados = 0
 
-  for (const fila of filas) {
-    const telefono = limpiarTelefono(fila.telefono_bruto)
+  for (let i = 0; i < filas.length; i++) {
+    const fila = filas[i]
+    const numFila = i + 2 // +2 porque la fila 1 es el header del CSV
 
-    // Regla de oro: sin teléfono, se ignora
+    // ── REGLA 1: Nombre de empresa obligatorio ──────────────────────────────
+    const nombreEmpresa = fila.empresa_nombre_bruto?.trim()
+    if (!nombreEmpresa) {
+      totalIgnorados++
+      errores.push(`Fila ${numFila}: sin nombre de empresa — fila ignorada`)
+      continue
+    }
+
+    // ── REGLA 2: Teléfono obligatorio ───────────────────────────────────────
+    const telefono = limpiarTelefono(fila.telefono_bruto)
     if (!telefono) {
       totalIgnorados++
+      errores.push(`Fila ${numFila} ("${nombreEmpresa}"): sin teléfono válido — fila ignorada`)
       continue
+    }
+
+    // ── REGLA 3: Categoría — buscar o crear en tabla categorias ────────────
+    const categoriaRaw = fila.categoria_sugerida?.trim() || null
+    let categoriaId: string | null = null
+
+    if (categoriaRaw) {
+      categoriaId = await obtenerOCrearCategoria(categoriaRaw, advertencias)
+    } else {
+      advertencias.push(`Fila ${numFila} ("${nombreEmpresa}"): sin categoría — se insertará sin categoría`)
     }
 
     leadsParaInsertar.push({
       lote_id: loteId,
-      empresa_nombre_bruto: fila.empresa_nombre_bruto?.trim() || null,
+      empresa_nombre_bruto: nombreEmpresa,
       telefono_bruto: telefono,
-      categoria_sugerida: fila.categoria_sugerida?.trim() || null,
+      categoria_sugerida: categoriaRaw,
       direccion_bruta: normalizarDireccion(fila.direccion_bruta),
       procesado: false,
+      status: false, // siempre empieza como pendiente
     })
   }
 
-  // ── PASO 4: Insertar en lotes de 50 (evita timeout en Supabase) ────────────
-  const TAMANO_LOTE = 50
+  // ── PASO 4: Insertar en chunks de 50 ───────────────────────────────────────
+  const TAMANO_CHUNK = 50
   let totalInsertados = 0
 
-  for (let i = 0; i < leadsParaInsertar.length; i += TAMANO_LOTE) {
-    const chunk = leadsParaInsertar.slice(i, i + TAMANO_LOTE)
+  for (let i = 0; i < leadsParaInsertar.length; i += TAMANO_CHUNK) {
+    const chunk = leadsParaInsertar.slice(i, i + TAMANO_CHUNK)
 
-    const { error } = await supabase
-      .from('leads_raw')
+    const { error } = await (supabase.from('leads_raw') as any)
       .insert(chunk)
 
     if (error) {
-      errores.push(`Error en filas ${i}–${i + chunk.length}: ${error.message}`)
+      errores.push(`Error insertando filas ${i + 1}–${i + chunk.length}: ${error.message}`)
     } else {
       totalInsertados += chunk.length
     }
   }
 
   // ── PASO 5: Actualizar total_registros en el lote ──────────────────────────
-  await supabase
-    .from('lotes_importacion')
+  await (supabase.from('lotes_importacion') as any)
     .update({ total_registros: totalInsertados })
-    .eq('id', loteId)
+    .eq('identificacion', loteId)
 
   return {
     loteId,
     totalInsertados,
     totalIgnorados,
     errores,
+    advertencias,
   }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * Busca la categoría en la tabla categorias.
+ * Si no existe, la crea automáticamente.
+ * Usa cache local para no hacer múltiples queries por la misma categoría.
+ */
+async function obtenerOCrearCategoria(
+  nombre: string,
+  advertencias: string[]
+): Promise<string | null> {
+  const nombreNormalizado = nombre.trim()
+
+  // 1. Revisar cache primero
+  if (cacheCategoriasId.has(nombreNormalizado)) {
+    return cacheCategoriasId.get(nombreNormalizado)!
+  }
+
+  // 2. Buscar en la base de datos (case-insensitive)
+  const { data } = await (supabase.from('categorias') as any)
+    .select('id')
+    .ilike('nombre', nombreNormalizado)
+    .single()
+
+  const existente = data as any
+
+  if (existente) {
+    cacheCategoriasId.set(nombreNormalizado, existente.id)
+    return existente.id
+  }
+
+  // 3. No existe → crear automáticamente
+  const { data: dataNueva, error } = await (supabase.from('categorias') as any)
+    .insert({ nombre: nombreNormalizado, activa: true })
+    .select('id')
+    .single()
+
+  const nueva = dataNueva as any
+
+  if (error || !nueva) {
+    advertencias.push(`No se pudo crear la categoría "${nombreNormalizado}": ${error?.message}`)
+    return null
+  }
+
+  advertencias.push(`Categoría nueva creada automáticamente: "${nombreNormalizado}"`)
+  cacheCategoriasId.set(nombreNormalizado, nueva.id)
+  return nueva.id
+}
+
 function parsearCSV(archivo: File): Promise<FilaCSV[]> {
   return new Promise((resolve, reject) => {
     Papa.parse<FilaCSV>(archivo, {
-      header: true,         // usa la primera fila como keys
+      header: true,
       skipEmptyLines: true,
       encoding: 'UTF-8',
       complete: (resultado) => resolve(resultado.data),
@@ -150,13 +226,10 @@ function parsearCSV(archivo: File): Promise<FilaCSV[]> {
 function limpiarTelefono(valor: string | undefined | null): string | null {
   if (!valor) return null
 
-  // Quita espacios, guiones, paréntesis — deja solo dígitos
   const soloDigitos = valor.replace(/\D/g, '')
 
-  // Descarta si tiene menos de 7 dígitos (no es un teléfono real)
   if (soloDigitos.length < 7) return null
 
-  // Descarta si parece una dirección que se coló en el campo teléfono
   if (valor.toLowerCase().includes('calle') || valor.toLowerCase().includes('av.')) return null
 
   return soloDigitos
@@ -167,7 +240,6 @@ function normalizarDireccion(valor: string | undefined | null): string | null {
 
   const limpio = valor.trim()
 
-  // El scraper a veces pone "Cómo llegar" o "·" cuando no hay dirección
   if (limpio === 'Cómo llegar' || limpio === '·' || limpio === '') return null
 
   return limpio

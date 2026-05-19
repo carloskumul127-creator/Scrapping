@@ -82,28 +82,6 @@ export interface Rol {
   // completar según tu tabla roles en Supabase
 }
 
-export interface Download {
-  id: string
-  industry: string
-  city: string | null
-  scope: string
-  contact_count: number
-  contact_titles: string[]
-  filename: string | null
-  created_at: string
-}
-
-export interface ContactOverrideRow {
-  phone: string
-  title: string | null
-  whatsapp_type: string | null
-  hidden: boolean
-  shared: boolean
-  shared_at: string | null
-  shared_with: string | null
-  updated_at: string
-}
-
 // ─── Tipos de inserción (sin id ni timestamps, los pone Supabase) ─────────────
 
 export type LeadRawInsert = Omit<LeadRaw, 'id' | 'created_at' | 'updated_at'>
@@ -111,9 +89,6 @@ export type LeadFinalInsert = Omit<LeadFinal, 'id'>
 export type CategoriaInsert = Omit<Categoria, 'id' | 'created_at' | 'updated_at'>
 export type ApiCredencialInsert = Omit<ApiCredencial, 'id' | 'created_at' | 'updated_at'>
 export type LoteImportacionInsert = Omit<LoteImportacion, 'id' | 'importado_en'>
-export type DownloadInsert = Omit<Download, 'id' | 'created_at'>
-export type ContactOverrideInsert = ContactOverrideRow
-
 
 // ─── Tipo Database (para el cliente de Supabase tipado) ───────────────────────
 
@@ -124,43 +99,26 @@ export interface Database {
         Row: Categoria
         Insert: CategoriaInsert
         Update: Partial<CategoriaInsert>
-        Relationships: { foreignKeyName: string; columns: string[]; isOneToOne: boolean; referencedRelation: string; referencedColumns: string[] }[]
       }
       leads_raw: {
         Row: LeadRaw
         Insert: LeadRawInsert
         Update: Partial<LeadRawInsert>
-        Relationships: { foreignKeyName: string; columns: string[]; isOneToOne: boolean; referencedRelation: string; referencedColumns: string[] }[]
       }
       leads_final: {
         Row: LeadFinal
         Insert: LeadFinalInsert
         Update: Partial<LeadFinalInsert>
-        Relationships: { foreignKeyName: string; columns: string[]; isOneToOne: boolean; referencedRelation: string; referencedColumns: string[] }[]
       }
       lotes_importacion: {
         Row: LoteImportacion
         Insert: LoteImportacionInsert
         Update: Partial<LoteImportacionInsert>
-        Relationships: { foreignKeyName: string; columns: string[]; isOneToOne: boolean; referencedRelation: string; referencedColumns: string[] }[]
       }
       api_credenciales: {
         Row: ApiCredencial
         Insert: ApiCredencialInsert
         Update: Partial<ApiCredencialInsert>
-        Relationships: { foreignKeyName: string; columns: string[]; isOneToOne: boolean; referencedRelation: string; referencedColumns: string[] }[]
-      }
-      downloads: {
-        Row: Download
-        Insert: DownloadInsert
-        Update: Partial<DownloadInsert>
-        Relationships: { foreignKeyName: string; columns: string[]; isOneToOne: boolean; referencedRelation: string; referencedColumns: string[] }[]
-      }
-      contact_overrides: {
-        Row: ContactOverrideRow
-        Insert: ContactOverrideInsert
-        Update: Partial<ContactOverrideInsert>
-        Relationships: { foreignKeyName: string; columns: string[]; isOneToOne: boolean; referencedRelation: string; referencedColumns: string[] }[]
       }
     }
     Views: {
