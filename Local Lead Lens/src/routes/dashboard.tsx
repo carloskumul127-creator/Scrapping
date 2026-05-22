@@ -4,13 +4,13 @@ import { supabase } from "@/integrations/supabase/client";
 import * as XLSX from "xlsx";
 import JSZip from "jszip";
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, PieChart, Pie, Cell, CartesianGrid,
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, CartesianGrid,
 } from "recharts";
 import {
-  Upload, Download, Search, Star, MessageSquare, Globe, Phone, MapPin, ExternalLink,
+  Upload, Download, Search, Globe, Phone, MapPin, ExternalLink,
   Building2, Compass, ChevronDown, ChevronRight, Sparkles, FileSpreadsheet, Filter,
   Trash2, EyeOff, MessageCircle, CheckSquare, Square, X, BarChart3, LayoutGrid, FilePlus2,
-  ArrowLeft, Copy, Check, Terminal, Send, Info, Eye
+  ArrowLeft, Copy, Check, Terminal, Send, Info, Eye, Plus, Users
 } from "lucide-react";
 import { Business, normalizeRow, sampleData } from "@/lib/dataset";
 import {
@@ -54,7 +54,7 @@ function groupBy<T>(arr: T[], key: (t: T) => string): Record<string, T[]> {
   }, {} as Record<string, T[]>);
 }
 function csvFromBusinesses(rows: Business[]) {
-  const header = ["Title", "Rating", "Reviews", "Phone", "Industry", "City", "Address", "Website", "Google Maps Link"];
+  const header = ["Title", "Phone", "WhatsApp Type", "Industry", "City", "Address", "Website", "Google Maps Link"];
   const escape = (v: any) => {
     const s = v == null ? "" : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -62,7 +62,7 @@ function csvFromBusinesses(rows: Business[]) {
   return [
     header.join(","),
     ...rows.map((r) =>
-      [r.title, r.rating ?? "", r.reviews ?? "", r.phone, r.industry, r.city, r.address, r.website, r.mapsLink]
+      [r.title, r.phone, (r as any).whatsappType ?? "", r.industry, r.city, r.address, r.website, r.mapsLink]
         .map(escape).join(","),
     ),
   ].join("\n");
@@ -72,21 +72,18 @@ function csvFromBusinesses(rows: Business[]) {
 function buildAISummary(rows: Business[]) {
   if (!rows.length) return "Carga datos para ver el análisis automático.";
   const total = rows.length;
-  const rated = rows.filter((r) => r.rating != null);
-  const avg = rated.reduce((s, r) => s + (r.rating ?? 0), 0) / Math.max(rated.length, 1);
   const withSite = rows.filter((r) => r.website).length;
   const sitePct = withSite / total;
-  const lowRated = rows.filter((r) => (r.rating ?? 5) < 3.5).length;
   const cities = new Set(rows.map((r) => r.city)).size;
   const industries = new Set(rows.map((r) => r.industry)).size;
-  const opportunity = rows.filter((r) => !r.website && (r.rating ?? 0) >= 4).length;
+  const enrichedRows = rows as EnrichedBusiness[];
+  const waBusiness = enrichedRows.filter((r) => r.whatsappType === "business").length;
+  const waNormal = enrichedRows.filter((r) => r.whatsappType === "normal").length;
+  const waFixed = enrichedRows.filter((r) => r.whatsappType === "fixed").length;
   return [
     `Se analizaron ${total} negocios en ${cities} ciudades y ${industries} industrias.`,
-    `Calificación promedio: ${avg.toFixed(2)}★. ${pct(sitePct)} cuenta con sitio web.`,
-    opportunity > 0
-      ? `Oportunidad: ${opportunity} negocios bien calificados (≥4★) NO tienen sitio web — leads de alta conversión.`
-      : `No se detectaron leads sin sitio web con calificación ≥4★.`,
-    lowRated > 0 ? `Anomalía: ${lowRated} negocios con calificación <3.5★ pueden requerir revisión manual.` : "",
+    `${pct(sitePct)} cuenta con sitio web.`,
+    `Tipos de número: ${waBusiness} WA Business · ${waNormal} WA Normal · ${waFixed} Fijo.`,
   ].filter(Boolean).join(" ");
 }
 
@@ -153,7 +150,6 @@ function Dashboard() {
   const [importFile, setImportFile] = useState<File | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
 
-  // Cargar usuario actual
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       setUserId(data.session?.user?.id ?? null);
@@ -222,12 +218,10 @@ function Dashboard() {
     }
   }, []);
 
-  // Auto-cargar dataset desde Supabase
   useEffect(() => {
     fetchLeadsFromSupabase();
   }, [fetchLeadsFromSupabase]);
 
-  // Cargar overrides desde el backend
   useEffect(() => { fetchOverrides().then(setOverrides); }, []);
 
   const reloadOverrides = useCallback(async () => {
@@ -240,7 +234,6 @@ function Dashboard() {
   const fileRef = useRef<HTMLInputElement>(null);
   const mergeFileRef = useRef<HTMLInputElement>(null);
 
-  /* ---------- enrich data with overrides + WA classification ---------- */
   const enriched = useMemo<EnrichedBusiness[]>(() => {
     return data.map((r) => {
       const key = phoneKey(r.phone);
@@ -260,18 +253,17 @@ function Dashboard() {
     });
   }, [data, overrides]);
 
-  /* ---------- visible (apply hidden + WA filter) ---------- */
   const visible = useMemo(() => {
     return enriched.filter((r) => {
       if (!showHidden && r.hidden) return false;
       if (waFilter !== "all" && r.whatsappType !== waFilter) return false;
       if (sharedFilter === "shared" && !r.shared) return false;
+      if (sharedFilter === "pending" && !r.shared && !r.hidden) return true;
       if (sharedFilter === "pending" && r.shared) return false;
       return true;
     });
   }, [enriched, waFilter, sharedFilter, showHidden]);
 
-  /* ---------- file upload ---------- */
   const onFile = useCallback(async (file: File) => {
     const buf = await file.arrayBuffer();
     const wb = XLSX.read(buf, { type: "array" });
@@ -281,7 +273,6 @@ function Dashboard() {
     setFileName(file.name);
   }, []);
 
-  /* ---------- merge file upload (ADD to existing data) ---------- */
   const onMergeFile = useCallback(async (file: File) => {
     const buf = await file.arrayBuffer();
     const wb = XLSX.read(buf, { type: "array" });
@@ -293,13 +284,11 @@ function Dashboard() {
       const existingKeys = new Set(prev.map((r) => `${r.title}|${r.phone}|${r.city}`));
       const unique = newRows.filter((r) => !existingKeys.has(`${r.title}|${r.phone}|${r.city}`));
       const merged = [...prev, ...unique];
-      alert(`Se agregaron ${unique.length} negocios nuevos (${newRows.length - unique.length} duplicados omitidos). Total: ${merged.length}`);
       return merged;
     });
     setFileName((prev) => prev ? `${prev} + ${file.name}` : file.name);
   }, []);
 
-  /* ---------- ZIP download (per industry / city CSV) ---------- */
   const downloadZip = useCallback(async () => {
     const zip = new JSZip();
     zip.file("ALL_BUSINESSES.csv", csvFromBusinesses(visible));
@@ -331,43 +320,24 @@ function Dashboard() {
     });
   }, [visible]);
 
-  /* ---------- focus dataset ---------- */
   const scope = useMemo(() => (focused ? visible.filter((r) => r.title === focused.title && r.city === focused.city) : visible), [visible, focused]);
 
-  /* ---------- derived metrics ---------- */
   const metrics = useMemo(() => {
     const total = scope.length;
-    const rated = scope.filter((r) => r.rating != null);
-    const avg = rated.length ? rated.reduce((s, r) => s + (r.rating ?? 0), 0) / rated.length : 0;
-    const reviews = scope.reduce((s, r) => s + (r.reviews ?? 0), 0);
     const withSite = scope.filter((r) => r.website).length;
     const phones = scope.filter((r) => r.phone && r.phone.replace(/\D/g, "").length >= 7).length;
-    return { total, avg, reviews, withSite, sitePct: total ? withSite / total : 0, phones };
+    const waBusiness = scope.filter((r) => r.whatsappType === "business").length;
+    const waNormal = scope.filter((r) => r.whatsappType === "normal").length;
+    const waFixed = scope.filter((r) => r.whatsappType === "fixed").length;
+    return { total, withSite, sitePct: total ? withSite / total : 0, phones, waBusiness, waNormal, waFixed };
   }, [scope]);
 
-  const ratingDist = useMemo(() => {
-    const buckets = [1, 2, 3, 4, 5].map((s) => ({ stars: `${s}★`, count: 0 }));
-    scope.forEach((r) => {
-      if (r.rating == null) return;
-      const idx = Math.max(0, Math.min(4, Math.round(r.rating) - 1));
-      buckets[idx].count += 1;
-    });
-    return buckets;
-  }, [scope]);
+  const waDist = useMemo(() => [
+    { tipo: "WA Business", count: scope.filter((r) => r.whatsappType === "business").length, color: "#10b981" },
+    { tipo: "WA Normal",   count: scope.filter((r) => r.whatsappType === "normal").length,   color: "#3b82f6" },
+    { tipo: "Fijo",        count: scope.filter((r) => r.whatsappType === "fixed").length,    color: "#ec4899" },
+  ], [scope]);
 
-  const reviewVolume = useMemo(() => {
-    const now = new Date();
-    const months = Array.from({ length: 12 }).map((_, i) => {
-      const d = new Date(now.getFullYear(), now.getMonth() - (11 - i), 1);
-      return { label: d.toLocaleDateString("es-MX", { month: "short", year: "2-digit" }), count: 0 };
-    });
-    const total = scope.reduce((s, r) => s + (r.reviews ?? 0), 0);
-    const weights = [0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1, 0.1, 0.1, 0.1, 0.11, 0.1];
-    months.forEach((m, i) => (m.count = Math.round(total * weights[i])));
-    return months;
-  }, [scope]);
-
-  /* ---------- segmentation: by industry, then city (uses visible) ---------- */
   const byIndustry = useMemo(() => {
     const groups = groupBy(visible, (r) => r.industry);
     return Object.entries(groups)
@@ -407,7 +377,6 @@ function Dashboard() {
 
   return (
     <div className="min-h-screen px-4 md:px-8 py-6 max-w-[1500px] mx-auto">
-      {/* Header */}
       <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
         <div className="flex items-center gap-3">
           <div className="w-11 h-11 rounded-2xl glass-strong glow-emerald flex items-center justify-center">
@@ -470,7 +439,6 @@ function Dashboard() {
         </div>
       </header>
 
-      {/* Tab navigation */}
       <nav className="glass rounded-2xl p-1.5 flex items-center gap-1 mb-6">
         <button
           onClick={() => setActiveTab("directory")}
@@ -495,7 +463,6 @@ function Dashboard() {
       {/* ===== ANALYTICS TAB ===== */}
       {activeTab === "analytics" && (
         <div>
-          {/* Focus banner */}
           {focused && (
             <section className="glass-strong rounded-2xl p-4 mb-6 flex items-center justify-between gap-4 border border-emerald/40">
               <div className="flex items-center gap-3">
@@ -517,7 +484,6 @@ function Dashboard() {
             </section>
           )}
 
-          {/* AI Summary */}
           <section className="glass rounded-2xl p-5 mb-6 flex gap-4 items-start">
             <div className="w-9 h-9 rounded-xl bg-violet/20 flex items-center justify-center shrink-0 glow-violet">
               <Sparkles className="w-4 h-4 text-violet" />
@@ -528,91 +494,57 @@ function Dashboard() {
             </div>
           </section>
 
-          {/* High-level metrics */}
           <section className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-            <MetricCard icon={<Building2 className="w-4 h-4" />} label="Total negocios" value={fmt(metrics.total)} accent="emerald" />
-            <MetricCard icon={<Star className="w-4 h-4" />} label="Rating promedio" value={metrics.avg.toFixed(2)} suffix="★" accent="azure" />
-            <MetricCard icon={<MessageSquare className="w-4 h-4" />} label="Total reseñas" value={fmt(metrics.reviews)} accent="violet" />
-            <MetricCard icon={<Globe className="w-4 h-4" />} label="% con sitio web" value={pct(metrics.sitePct)} accent="pink" />
+            <MetricCard icon={<Building2 className="w-4 h-4" />} label="Total negocios"  value={fmt(metrics.total)}       accent="emerald" />
+            <MetricCard icon={<Phone className="w-4 h-4" />}     label="WA Business"     value={fmt(metrics.waBusiness)}  accent="azure" />
+            <MetricCard icon={<Phone className="w-4 h-4" />}     label="WA Normal"       value={fmt(metrics.waNormal)}    accent="violet" />
+            <MetricCard icon={<Phone className="w-4 h-4" />}     label="Fijo"            value={fmt(metrics.waFixed)}     accent="pink" />
           </section>
 
-          {/* Charts */}
           <section className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-            <ChartCard title="Distribución de calificaciones" className="lg:col-span-1">
+            <ChartCard title="Distribución de tipos de número" className="lg:col-span-1">
               <ResponsiveContainer width="100%" height={240}>
-                <BarChart data={ratingDist}>
+                <BarChart data={waDist}>
                   <CartesianGrid stroke="rgba(255,255,255,0.05)" vertical={false} />
-                  <XAxis dataKey="stars" stroke="#94a3b8" fontSize={12} />
-                  <YAxis stroke="#94a3b8" fontSize={12} />
+                  <XAxis dataKey="tipo" stroke="#94a3b8" fontSize={12} />
+                  <YAxis stroke="#94a3b8" fontSize={12} allowDecimals={false} />
                   <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
                   <Bar dataKey="count" radius={[8, 8, 0, 0]}>
-                    {ratingDist.map((_, i) => (
-                      <Cell key={i} fill={ACCENT[i % ACCENT.length]} />
+                    {waDist.map((entry, i) => (
+                      <Cell key={i} fill={entry.color} />
                     ))}
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
             </ChartCard>
 
-            <ChartCard title="Volumen de reseñas (últimos 12 meses)" className="lg:col-span-2">
-              <ResponsiveContainer width="100%" height={240}>
-                <AreaChart data={reviewVolume}>
-                  <defs>
-                    <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#10b981" stopOpacity={0.7} />
-                      <stop offset="100%" stopColor="#10b981" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke="rgba(255,255,255,0.05)" vertical={false} />
-                  <XAxis dataKey="label" stroke="#94a3b8" fontSize={12} />
-                  <YAxis stroke="#94a3b8" fontSize={12} />
-                  <Tooltip contentStyle={tooltipStyle} />
-                  <Area type="monotone" dataKey="count" stroke="#10b981" strokeWidth={2} fill="url(#g1)" />
-                </AreaChart>
-              </ResponsiveContainer>
-            </ChartCard>
-          </section>
-
-          {/* Digital presence + phones */}
-          <section className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-8">
-            <ChartCard title="Presencia digital">
-              <ResponsiveContainer width="100%" height={220}>
+            <ChartCard title="Proporción de tipos de número" className="lg:col-span-2">
+              <ResponsiveContainer width="100%" height={200}>
                 <PieChart>
                   <Pie
-                    data={[
-                      { name: "Con sitio", value: metrics.withSite },
-                      { name: "Sin sitio", value: metrics.total - metrics.withSite },
-                    ]}
-                    dataKey="value"
-                    innerRadius={55}
-                    outerRadius={85}
+                    data={waDist}
+                    dataKey="count"
+                    nameKey="tipo"
+                    innerRadius={60}
+                    outerRadius={90}
                     paddingAngle={4}
                   >
-                    <Cell fill="#10b981" />
-                    <Cell fill="#ec4899" />
+                    {waDist.map((entry, i) => (
+                      <Cell key={i} fill={entry.color} />
+                    ))}
                   </Pie>
                   <Tooltip contentStyle={tooltipStyle} />
                 </PieChart>
               </ResponsiveContainer>
-              <div className="flex justify-center gap-4 text-xs font-mono -mt-2">
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald" /> Con sitio</span>
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-pink" /> Sin sitio</span>
+              <div className="flex justify-center gap-6 text-xs font-mono -mt-2">
+                {waDist.map((entry) => (
+                  <span key={entry.tipo} className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full" style={{ background: entry.color }} />
+                    {entry.tipo} <span className="opacity-60">({fmt(entry.count)})</span>
+                  </span>
+                ))}
               </div>
             </ChartCard>
-
-            <div className="glass rounded-2xl p-5 lg:col-span-2 flex flex-col justify-between">
-              <div className="text-xs uppercase tracking-widest text-muted-foreground font-mono mb-2">KPIs clave</div>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <KpiBlock value={fmt(metrics.phones)} label="Teléfonos válidos" icon={<Phone className="w-4 h-4 text-azure" />} />
-                <KpiBlock value={fmt(byIndustry.length)} label="Industrias" icon={<Compass className="w-4 h-4 text-violet" />} />
-                <KpiBlock value={fmt(new Set(visible.map((d) => d.city)).size)} label="Ciudades" icon={<MapPin className="w-4 h-4 text-pink" />} />
-                <KpiBlock
-                  value={`${fmt(enriched.filter((r) => !r.hidden && r.shared).length)} / ${fmt(enriched.filter((r) => !r.hidden).length)}`}
-                  label="Ya compartidos"
-                  icon={<MessageCircle className="w-4 h-4 text-emerald" />}
-                />
-              </div>
-            </div>
           </section>
         </div>
       )}
@@ -620,7 +552,6 @@ function Dashboard() {
       {/* ===== DIRECTORY TAB ===== */}
       {activeTab === "directory" && (
         <div>
-          {/* Industry quick-access buttons */}
           <div className="flex flex-wrap gap-2 mb-4">
             {byIndustry.map(({ industry }, i) => (
               <button
@@ -637,7 +568,6 @@ function Dashboard() {
             ))}
           </div>
 
-          {/* Search + WhatsApp filter */}
           <div className="flex flex-wrap items-center gap-3 mb-4 sticky top-0 z-30 py-3 -mx-4 px-4 md:-mx-8 md:px-8" style={{ background: "linear-gradient(180deg, rgba(11,16,32,0.97) 70%, rgba(11,16,32,0) 100%)" }}>
             <div className="glass rounded-xl flex items-center gap-2 px-3 py-2 flex-1 min-w-[220px] max-w-md">
               <Search className="w-4 h-4 text-muted-foreground" />
@@ -701,7 +631,6 @@ function Dashboard() {
             </div>
           </div>
 
-          {/* INDUSTRY BLOCKS — separated, with city subdivisions */}
           <section className="space-y-5">
             {byIndustry.map(({ industry, rows, cities }, i) => {
               const isOpen = openTags[industry] ?? false;
@@ -709,7 +638,6 @@ function Dashboard() {
               const visibleRows = filterRows(rows);
               return (
                 <div key={industry} id={`industry-${industry}`} className="glass rounded-2xl overflow-hidden scroll-mt-24">
-                  {/* Block header */}
                   <button
                     onClick={() => setOpenTags((s) => ({ ...s, [industry]: !isOpen }))}
                     className="w-full flex items-center justify-between px-5 py-4 hover:bg-white/[0.02] transition"
@@ -729,9 +657,9 @@ function Dashboard() {
                       </div>
                     </div>
                     <div className="flex items-center gap-4">
-                      <SmallStat label="rating" value={(rows.reduce((s, r) => s + (r.rating ?? 0), 0) / Math.max(rows.filter((r) => r.rating).length, 1)).toFixed(2)} />
-                      <SmallStat label="reviews" value={fmt(rows.reduce((s, r) => s + (r.reviews ?? 0), 0))} />
-                      <SmallStat label="con web" value={pct(rows.filter((r) => r.website).length / rows.length)} />
+                      <SmallStat label="Business" value={fmt((rows as EnrichedBusiness[]).filter((r) => r.whatsappType === "business").length)} />
+                      <SmallStat label="Normal"   value={fmt((rows as EnrichedBusiness[]).filter((r) => r.whatsappType === "normal").length)} />
+                      <SmallStat label="Fijo"     value={fmt((rows as EnrichedBusiness[]).filter((r) => r.whatsappType === "fixed").length)} />
                       {isOpen ? <ChevronDown className="w-5 h-5 text-muted-foreground" /> : <ChevronRight className="w-5 h-5 text-muted-foreground" />}
                     </div>
                   </button>
@@ -796,7 +724,6 @@ function Dashboard() {
         />
       )}
 
-      {/* Floating Action Bar */}
       {Object.keys(selectedBusinesses).length > 0 && currentView === "dashboard" && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-xl transition-all duration-300">
           <div className="glass-strong rounded-2xl px-6 py-4 flex items-center justify-between border border-white/10 shadow-[0_15px_40px_-10px_rgba(0,0,0,0.5)] bg-black/70 backdrop-blur-xl">
@@ -829,7 +756,6 @@ function Dashboard() {
   );
 }
 
-/* ---------- subcomponents ---------- */
 const tooltipStyle = {
   background: "rgba(17,24,39,0.95)",
   border: "1px solid rgba(255,255,255,0.08)",
@@ -904,7 +830,7 @@ function CityBlock({
   onSelectBatch: (rows: Business[], force?: boolean) => void;
   getBusinessKey: (b: Business) => string;
 }) {
-  const [sortKey, setSortKey] = useState<keyof Business>("rating");
+  const [sortKey, setSortKey] = useState<keyof Business>("title");
   const [dir, setDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
 
@@ -965,7 +891,7 @@ function CityBlock({
   const markShared = async (r: EnrichedBusiness) => {
     if (!r.phoneKey) return;
     const who = prompt(`¿A qué empresa/cliente le pasaste el contacto de "${r.title}"?\n(opcional, deja vacío si solo quieres marcarlo)`, r.sharedWith ?? "");
-    if (who === null) return; // cancelled
+    if (who === null) return;
     await upsertOverride({
       phone: r.phoneKey,
       title: r.title,
@@ -1017,7 +943,7 @@ function CityBlock({
                 />
               </th>
               {[
-                ["title", "Nombre"], ["rating", "★ / Reseñas"], ["phone", "Teléfono · WhatsApp"],
+                ["title", "Nombre"], ["phone", "Teléfono · WhatsApp"],
                 ["address", "Dirección"], ["website", "Web"], ["mapsLink", "Google Maps"],
               ].map(([k, label]) => (
                 <th
@@ -1060,7 +986,6 @@ function CityBlock({
                       <button
                         onClick={() => { onFocus(r); }}
                         className="text-left hover:text-emerald hover:underline inline-flex items-center gap-1"
-                        title="Click para enfocar este negocio en las gráficas"
                       >
                         {r.title}
                       </button>
@@ -1073,13 +998,6 @@ function CityBlock({
                         </span>
                       )}
                     </div>
-                  </td>
-                  <td className="px-4 py-2.5 whitespace-nowrap">
-                    <span className="inline-flex items-center gap-1.5">
-                      <Star className={`w-3 h-3 ${r.rating ? "text-emerald fill-emerald" : "text-muted-foreground"}`} />
-                      <span className="font-semibold">{r.rating != null ? r.rating.toFixed(1) : "0.0"}</span>
-                      <span className="font-mono text-xs text-muted-foreground">({fmt(r.reviews ?? 0)})</span>
-                    </span>
                   </td>
                   <td className="px-4 py-2.5 font-mono text-xs whitespace-nowrap">
                     {r.phone ? (
@@ -1462,7 +1380,7 @@ function PickerColumn({
                   )}
                   <span className="truncate text-left">{key}</span>
                 </span>
-                <span className="text-xs font-mono opacity-60 shrink-0">{fmt(rows.length)}</span>
+                <span className="text-xs font-mono opacity-50 shrink-0">({rows.length})</span>
               </button>
             </li>
           );
@@ -1473,6 +1391,15 @@ function PickerColumn({
 }
 
 /* ---------- API CONFIGURATION VIEW (PREMIUM) ---------- */
+interface Client {
+  id: string;
+  name: string;
+  webhookUrl: string;
+  authType: "none" | "bearer" | "apikey";
+  token: string;
+  httpMethod: "POST" | "PUT";
+}
+
 interface ApiConfigViewProps {
   selectedBusinesses: Record<string, Business>;
   onClose: () => void;
@@ -1480,7 +1407,19 @@ interface ApiConfigViewProps {
 }
 
 function ApiConfigView({ selectedBusinesses, onClose, onClear }: ApiConfigViewProps) {
-  const [webhookUrl, setWebhookUrl] = useState("https://hook.us1.make.com/xxxxxxxxxxxxxxxxxxxxxxxx");
+  const [clients, setClients] = useState<Client[]>([]);
+  const [selectedClientId, setSelectedClientId] = useState<string>("custom");
+  const [includeClientInPayload, setIncludeClientInPayload] = useState(false);
+
+  // New client form state
+  const [isAddingClient, setIsAddingClient] = useState(false);
+  const [newClientName, setNewClientName] = useState("");
+  const [newClientUrl, setNewClientUrl] = useState("");
+  const [newClientMethod, setNewClientMethod] = useState<"POST" | "PUT">("POST");
+  const [newClientAuthType, setNewClientAuthType] = useState<"none" | "bearer" | "apikey">("none");
+  const [newClientToken, setNewClientToken] = useState("");
+
+  const [webhookUrl, setWebhookUrl] = useState("");
   const [authType, setAuthType] = useState<"none" | "bearer" | "apikey">("none");
   const [token, setToken] = useState("");
   const [httpMethod, setHttpMethod] = useState<"POST" | "PUT">("POST");
@@ -1498,23 +1437,270 @@ function ApiConfigView({ selectedBusinesses, onClose, onClear }: ApiConfigViewPr
   const [copiedPayload, setCopiedPayload] = useState(false);
 
   const selectedList = useMemo(() => Object.values(selectedBusinesses), [selectedBusinesses]);
+
+  const selectedClient = useMemo(() => clients.find(c => c.id === selectedClientId), [selectedClientId, clients]);
+  
+  // Fetch clients from Supabase 'clientes' table
+  const fetchClients = useCallback(async () => {
+    try {
+      const { data, error } = await (supabase.from('clientes') as any)
+        .select('*')
+        .order('creado_en', { ascending: true });
+
+      if (error) {
+        console.error("Error fetching clients from Supabase:", error);
+        return;
+      }
+
+      if (data) {
+        const mapped: Client[] = data.map((c: any) => {
+          let authType: "none" | "bearer" | "apikey" = "none";
+          let token = c.api_key || "";
+          if (token && token !== "none") {
+            if (token.toLowerCase().startsWith("bearer ")) {
+              authType = "bearer";
+              token = token.substring(7);
+            } else {
+              authType = "apikey";
+            }
+          } else {
+            token = "";
+          }
+
+          return {
+            id: c.id,
+            name: c.nombre_empresa || "Sin nombre",
+            webhookUrl: c.contacto || "",
+            authType,
+            token,
+            httpMethod: "POST"
+          };
+        });
+        setClients(mapped);
+        
+        // Auto-select first client if available
+        if (mapped.length > 0) {
+          setSelectedClientId(mapped[0].id);
+        } else {
+          setSelectedClientId("custom");
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load clients from Supabase:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchClients();
+  }, [fetchClients]);
+
+  // Automatically fill form when client changes
+  useEffect(() => {
+    if (selectedClientId === "custom") {
+      setWebhookUrl("");
+      setAuthType("none");
+      setToken("");
+      setHttpMethod("POST");
+      return;
+    }
+    const client = clients.find(c => c.id === selectedClientId);
+    if (client) {
+      setWebhookUrl(client.webhookUrl);
+      setAuthType(client.authType);
+      setToken(client.token);
+      setHttpMethod(client.httpMethod);
+    }
+  }, [selectedClientId, clients]);
+
+  // Check if form values differ from the selected client
+  const hasChanges = useMemo(() => {
+    if (!selectedClient) return false;
+    return (
+      webhookUrl !== selectedClient.webhookUrl ||
+      authType !== selectedClient.authType ||
+      token !== selectedClient.token ||
+      httpMethod !== selectedClient.httpMethod
+    );
+  }, [selectedClient, webhookUrl, authType, token, httpMethod]);
+
+  const handleSaveClientChanges = async () => {
+    if (!selectedClient) return;
+
+    try {
+      let formattedKey = "none";
+      if (authType !== "none" && token.trim()) {
+        if (authType === "bearer") {
+          formattedKey = `Bearer ${token.trim()}`;
+        } else {
+          formattedKey = token.trim();
+        }
+      }
+
+      const { error } = await (supabase.from('clientes') as any)
+        .update({
+          contacto: webhookUrl,
+          api_key: formattedKey
+        })
+        .eq('id', selectedClientId);
+
+      if (error) {
+        console.error("Error updating client in Supabase:", error);
+        alert(`Error al actualizar cliente en Supabase: ${error.message}`);
+        return;
+      }
+
+      const updatedClients = clients.map(c => {
+        if (c.id === selectedClientId) {
+          return {
+            ...c,
+            webhookUrl,
+            authType,
+            token,
+            httpMethod
+          };
+        }
+        return c;
+      });
+      setClients(updatedClients);
+      alert(`Cambios guardados en el perfil de "${selectedClient.name}" en Supabase.`);
+    } catch (err: any) {
+      console.error("Failed to update client in Supabase:", err);
+      alert(`Error inesperado al guardar cambios: ${err.message || String(err)}`);
+    }
+  };
+
+  const handleAddClientSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newClientName.trim()) {
+      alert("Por favor, introduce un nombre para el cliente.");
+      return;
+    }
+    if (!newClientUrl.trim() || !newClientUrl.startsWith("http")) {
+      alert("Por favor, introduce una URL de Webhook válida (debe empezar con http:// o https://).");
+      return;
+    }
+
+    try {
+      let formattedKey = "none";
+      if (newClientAuthType !== "none" && newClientToken.trim()) {
+        if (newClientAuthType === "bearer") {
+          formattedKey = `Bearer ${newClientToken.trim()}`;
+        } else {
+          formattedKey = newClientToken.trim();
+        }
+      }
+
+      const { data, error } = await (supabase.from('clientes') as any).insert([
+        {
+          nombre_empresa: newClientName.trim(),
+          contacto: newClientUrl.trim(),
+          api_key: formattedKey,
+          activo: true
+        }
+      ]).select();
+
+      if (error) {
+        console.error("Error creating client in Supabase:", error);
+        alert(`Error al crear cliente en Supabase: ${error.message}`);
+        return;
+      }
+
+      if (data && data[0]) {
+        const created = data[0];
+        let authType: "none" | "bearer" | "apikey" = "none";
+        let token = created.api_key || "";
+        if (token && token !== "none") {
+          if (token.toLowerCase().startsWith("bearer ")) {
+            authType = "bearer";
+            token = token.substring(7);
+          } else {
+            authType = "apikey";
+          }
+        } else {
+          token = "";
+        }
+
+        const newClient: Client = {
+          id: created.id,
+          name: created.nombre_empresa,
+          webhookUrl: created.contacto || "",
+          authType,
+          token,
+          httpMethod: "POST"
+        };
+
+        setClients([...clients, newClient]);
+        setSelectedClientId(newClient.id);
+        setIsAddingClient(false);
+        
+        // Clear form fields
+        setNewClientName("");
+        setNewClientUrl("");
+        setNewClientMethod("POST");
+        setNewClientAuthType("none");
+        setNewClientToken("");
+
+        alert(`Cliente "${newClient.name}" guardado exitosamente en Supabase.`);
+      }
+    } catch (err: any) {
+      console.error("Failed to add client to Supabase:", err);
+      alert(`Error inesperado al guardar cliente: ${err.message || String(err)}`);
+    }
+  };
+
+  const handleDeleteClient = async (clientId: string, clientName: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm(`¿Estás seguro de que deseas eliminar al cliente "${clientName}" de Supabase?`)) return;
+    
+    try {
+      const { error } = await (supabase.from('clientes') as any)
+        .delete()
+        .eq('id', clientId);
+
+      if (error) {
+        console.error("Error deleting client from Supabase:", error);
+        alert(`Error al eliminar cliente de Supabase: ${error.message}`);
+        return;
+      }
+
+      const updatedClients = clients.filter(c => c.id !== clientId);
+      setClients(updatedClients);
+      
+      if (selectedClientId === clientId) {
+        setSelectedClientId(updatedClients.length > 0 ? updatedClients[0].id : "custom");
+      }
+      alert(`Cliente "${clientName}" eliminado exitosamente de Supabase.`);
+    } catch (err: any) {
+      console.error("Failed to delete client from Supabase:", err);
+      alert(`Error inesperado al eliminar cliente: ${err.message || String(err)}`);
+    }
+  };
   
   // Format the contacts payload dynamically
   const payloadJson = useMemo(() => {
-    return JSON.stringify(
-      selectedList.map((r) => ({
-        nombre: r.title,
-        telefono: r.phone,
-        tipo_whatsapp: r.whatsappType || "fixed",
-        industria: r.industry,
-        ciudad: r.city,
-        direccion: r.address,
-        web: r.website || null
-      })),
-      null,
-      2
-    );
-  }, [selectedList]);
+    const leads = selectedList.map((r) => ({
+      nombre: r.title,
+      telefono: r.phone,
+      tipo_whatsapp: r.whatsappType || "fixed",
+      industria: r.industry,
+      ciudad: r.city,
+      direccion: r.address,
+      web: r.website || null
+    }));
+
+    if (includeClientInPayload && selectedClient) {
+      return JSON.stringify(
+        {
+          cliente: selectedClient.name,
+          leads
+        },
+        null,
+        2
+      );
+    }
+
+    return JSON.stringify(leads, null, 2);
+  }, [selectedList, includeClientInPayload, selectedClient]);
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(payloadJson);
@@ -1533,7 +1719,13 @@ function ApiConfigView({ selectedBusinesses, onClose, onClear }: ApiConfigViewPr
     const now = () => new Date().toLocaleTimeString("es-MX");
     
     const initialLogs = [
-      { timestamp: now(), type: "info" as const, message: `Iniciando petición HTTP ${httpMethod} a: ${webhookUrl}` },
+      { 
+        timestamp: now(), 
+        type: "info" as const, 
+        message: `Iniciando petición HTTP ${httpMethod} a: ${webhookUrl}${
+          selectedClient ? ` para el cliente "${selectedClient.name}"` : ""
+        }` 
+      },
       { timestamp: now(), type: "info" as const, message: `Preparando datos de ${selectedList.length} leads seleccionados...` },
     ];
     setLogOutput(initialLogs);
@@ -1589,7 +1781,7 @@ function ApiConfigView({ selectedBusinesses, onClose, onClear }: ApiConfigViewPr
           ...prev,
           { timestamp: now(), type: "warn" as const, message: `[Alerta CORS / Red] La petición fue bloqueada por políticas CORS del navegador o firewall local.` },
           { timestamp: now(), type: "info" as const, message: `Detalle: Esto es totalmente NORMAL cuando se envían webhooks directamente desde el navegador a Make o Zapier sin un servidor intermedio.` },
-          { timestamp: now(), type: "success" as const, message: `[Simulación Exitosa] Estructura del JSON validada. ¡Tu integración funcionará perfectamente en producción!` },
+          { timestamp: now(), type: "success" as const, message: `[Simulación Exitosa] Estructura del JSON validada. ¡Tu integración para el cliente "${selectedClient?.name || 'Personalizado'}" funcionará perfectamente en producción!` },
           { timestamp: now(), type: "success" as const, message: `Simulación finalizada: HTTP 200 OK (Envío correcto de ${selectedList.length} leads).` }
         ]);
         setResponseStatus(200);
@@ -1636,13 +1828,228 @@ function ApiConfigView({ selectedBusinesses, onClose, onClear }: ApiConfigViewPr
         {/* LEFT COLUMN: FORM & PLAYLOAD PREVIEW (7 cols) */}
         <div className="lg:col-span-7 space-y-6">
           
-          {/* Endpoint config card */}
-          <div className="glass rounded-2xl p-5 md:p-6 space-y-5">
-            <div className="flex items-center gap-3 border-b border-white/5 pb-3">
-              <div className="w-8 h-8 rounded-lg bg-emerald/20 flex items-center justify-center glow-emerald">
-                <Globe className="w-4 h-4 text-emerald" />
+          {/* Section: Client Management */}
+          <div className="glass rounded-2xl p-5 md:p-6 space-y-5 border border-white/10 relative overflow-hidden">
+            {/* Background glowing element for high aesthetic */}
+            <div className="absolute -top-[30%] -right-[20%] w-[200px] h-[200px] bg-emerald/10 rounded-full blur-[80px] pointer-events-none" />
+
+            <div className="flex items-center justify-between border-b border-white/5 pb-3">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-emerald/20 flex items-center justify-center glow-emerald">
+                  <Building2 className="w-4 h-4 text-emerald" />
+                </div>
+                <div>
+                  <h2 className="text-base font-semibold">Clientes Registrados</h2>
+                  <p className="text-xs text-muted-foreground">Elige a qué cliente le vas a enviar estos leads</p>
+                </div>
               </div>
-              <h2 className="text-base font-semibold">Parámetros del Webhook</h2>
+
+              <button
+                onClick={() => setIsAddingClient(!isAddingClient)}
+                className="px-3 py-1.5 rounded-lg border border-white/10 hover:border-emerald/30 bg-white/5 hover:bg-white/10 text-xs font-mono flex items-center gap-1.5 transition text-emerald hover:glow-emerald"
+              >
+                <FilePlus2 className="w-3.5 h-3.5" /> {isAddingClient ? "Cerrar" : "Nuevo Cliente"}
+              </button>
+            </div>
+
+            {/* Inline add client form */}
+            {isAddingClient && (
+              <form onSubmit={handleAddClientSubmit} className="p-4 rounded-xl bg-white/[0.02] border border-white/5 space-y-4 animate-in fade-in slide-in-from-top-2 duration-200">
+                <h3 className="text-xs uppercase tracking-widest text-emerald font-mono font-bold">Registrar Nuevo Cliente</h3>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-mono text-muted-foreground">Nombre del Cliente *</label>
+                    <input
+                      type="text"
+                      required
+                      value={newClientName}
+                      onChange={(e) => setNewClientName(e.target.value)}
+                      placeholder="Ej. Constructora Veracruz"
+                      className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-emerald/50 text-foreground"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-mono text-muted-foreground">Webhook URL / Endpoint *</label>
+                    <input
+                      type="url"
+                      required
+                      value={newClientUrl}
+                      onChange={(e) => setNewClientUrl(e.target.value)}
+                      placeholder="https://hook.us1.make.com/..."
+                      className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-emerald/50 font-mono text-foreground"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-mono text-muted-foreground">Método HTTP</label>
+                    <select
+                      value={newClientMethod}
+                      onChange={(e) => setNewClientMethod(e.target.value as "POST" | "PUT")}
+                      className="w-full bg-black/30 border border-white/10 rounded-lg px-2 py-2 text-xs focus:outline-none focus:border-emerald/50 text-emerald font-mono cursor-pointer"
+                    >
+                      <option value="POST" className="bg-popover text-foreground">POST (Envío)</option>
+                      <option value="PUT" className="bg-popover text-foreground">PUT (Update)</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-mono text-muted-foreground">Autenticación</label>
+                    <select
+                      value={newClientAuthType}
+                      onChange={(e) => {
+                        setNewClientAuthType(e.target.value as "none" | "bearer" | "apikey");
+                        setNewClientToken("");
+                      }}
+                      className="w-full bg-black/30 border border-white/10 rounded-lg px-2 py-2 text-xs focus:outline-none focus:border-emerald/50 text-azure font-mono cursor-pointer"
+                    >
+                      <option value="none" className="bg-popover text-foreground">Ninguna</option>
+                      <option value="bearer" className="bg-popover text-foreground">Bearer Token</option>
+                      <option value="apikey" className="bg-popover text-foreground">API Key</option>
+                    </select>
+                  </div>
+
+                  {newClientAuthType !== "none" && (
+                    <div className="md:col-span-2 space-y-1.5">
+                      <label className="text-xs font-mono text-muted-foreground">
+                        {newClientAuthType === "bearer" ? "Token Bearer / JWT" : "Clave de API Key"}
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={newClientToken}
+                        onChange={(e) => setNewClientToken(e.target.value)}
+                        placeholder="Introduce la clave secreta..."
+                        className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-emerald/50 font-mono text-foreground"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-2 justify-end pt-2 border-t border-white/5">
+                  <button
+                    type="button"
+                    onClick={() => setIsAddingClient(false)}
+                    className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-transparent text-xs text-foreground transition font-mono"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-lg bg-emerald hover:bg-emerald/90 text-primary-foreground text-xs font-semibold glow-emerald transition"
+                  >
+                    Guardar Cliente
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* Clients grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {clients.map((c) => {
+                const isSelected = selectedClientId === c.id;
+                // Try to identify provider for nice icon representation
+                const isMake = c.webhookUrl.toLowerCase().includes("make.com");
+                const isZapier = c.webhookUrl.toLowerCase().includes("zapier.com");
+
+                return (
+                  <div
+                    key={c.id}
+                    onClick={() => setSelectedClientId(c.id)}
+                    className={`p-3.5 rounded-xl border flex flex-col justify-between text-left cursor-pointer transition-all duration-300 relative group overflow-hidden ${
+                      isSelected
+                        ? "border-emerald/50 bg-emerald/10 shadow-lg glow-emerald"
+                        : "border-white/10 bg-white/5 hover:bg-white/10 hover:border-white/20"
+                    }`}
+                  >
+                    {/* Background badge for visual flavor */}
+                    <div className="absolute right-2 -bottom-2 text-white/[0.02] text-5xl font-mono select-none group-hover:scale-110 transition duration-300">
+                      {isMake ? "Make" : isZapier ? "Zapier" : "API"}
+                    </div>
+
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className={`w-2 h-2 rounded-full ${isSelected ? "bg-emerald animate-pulse" : "bg-muted-foreground/40"}`} />
+                        <span className="font-semibold text-sm tracking-tight text-foreground truncate">{c.name}</span>
+                      </div>
+                      
+                      <button
+                        onClick={(e) => handleDeleteClient(c.id, c.name, e)}
+                        className="p-1 rounded bg-transparent hover:bg-pink/15 text-muted-foreground hover:text-pink opacity-0 group-hover:opacity-100 transition duration-200"
+                        title="Eliminar Cliente"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="mt-2.5 flex items-center justify-between text-[11px] font-mono text-muted-foreground">
+                      <span className="truncate max-w-[150px]">{c.webhookUrl}</span>
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                        c.httpMethod === "POST" ? "bg-emerald/15 text-emerald" : "bg-azure/15 text-azure"
+                      }`}>
+                        {c.httpMethod}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* Custom Configuration card */}
+              <div
+                onClick={() => setSelectedClientId("custom")}
+                className={`p-3.5 rounded-xl border flex flex-col justify-center items-center text-center cursor-pointer transition-all duration-300 ${
+                  selectedClientId === "custom"
+                    ? "border-azure/50 bg-azure/10 shadow-lg"
+                    : "border-white/10 bg-white/5 hover:bg-white/10 hover:border-white/20"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <Globe className={`w-4 h-4 ${selectedClientId === "custom" ? "text-azure" : "text-muted-foreground"}`} />
+                  <span className="font-semibold text-sm text-foreground">Configuración Manual</span>
+                </div>
+                <span className="text-[11px] text-muted-foreground font-mono mt-1">Escribe los parámetros manualmente</span>
+              </div>
+            </div>
+
+            {/* Selected Client Indicator / Save Changes status bar */}
+            <div className="pt-3 border-t border-white/5 flex items-center justify-between">
+              <div className="text-xs font-mono text-muted-foreground">
+                Cliente Activo: <span className={selectedClient ? "text-emerald font-bold" : "text-azure font-bold"}>
+                  {selectedClient ? selectedClient.name : "Personalizado / Manual"}
+                </span>
+              </div>
+              
+              {selectedClient && hasChanges && (
+                <button
+                  onClick={handleSaveClientChanges}
+                  className="px-2.5 py-1.5 rounded-lg bg-emerald/20 hover:bg-emerald text-emerald hover:text-primary-foreground border border-emerald/30 text-xs font-mono flex items-center gap-1 transition"
+                >
+                  <Check className="w-3.5 h-3.5" /> Guardar cambios del cliente
+                </button>
+              )}
+            </div>
+          </div>
+          
+          {/* Endpoint config card */}
+          <div className="glass rounded-2xl p-5 md:p-6 space-y-5 relative overflow-hidden">
+            {/* Background visual flavor */}
+            <div className="absolute -bottom-[20%] -left-[10%] w-[180px] h-[180px] bg-emerald/5 rounded-full blur-[70px] pointer-events-none" />
+
+            <div className="flex items-center justify-between border-b border-white/5 pb-3">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-emerald/20 flex items-center justify-center glow-emerald">
+                  <Globe className="w-4 h-4 text-emerald" />
+                </div>
+                <h2 className="text-base font-semibold">Parámetros del Webhook</h2>
+              </div>
+              
+              {selectedClient && (
+                <div className="flex items-center gap-2 bg-white/5 border border-white/5 rounded-lg px-2.5 py-1">
+                  <div className="w-1.5 h-1.5 rounded-full bg-emerald animate-pulse" />
+                  <span className="text-[11px] font-mono text-emerald">Integración Activa</span>
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
@@ -1652,8 +2059,10 @@ function ApiConfigView({ selectedBusinesses, onClose, onClear }: ApiConfigViewPr
                 <input
                   type="text"
                   value={webhookUrl}
-                  onChange={(e) => setWebhookUrl(e.target.value)}
-                  className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald/50 font-mono"
+                  onChange={(e) => {
+                    setWebhookUrl(e.target.value);
+                  }}
+                  className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald/50 font-mono text-foreground"
                   placeholder="https://hook.us1.make.com/..."
                 />
               </div>
@@ -1699,7 +2108,7 @@ function ApiConfigView({ selectedBusinesses, onClose, onClear }: ApiConfigViewPr
                     value={token}
                     onChange={(e) => setToken(e.target.value)}
                     disabled={authType === "none"}
-                    className="w-full bg-black/30 border border-white/10 rounded-xl pl-4 pr-10 py-3 text-sm focus:outline-none focus:border-emerald/50 font-mono"
+                    className="w-full bg-black/30 border border-white/10 rounded-xl pl-4 pr-10 py-3 text-sm focus:outline-none focus:border-emerald/50 font-mono text-foreground"
                     placeholder={authType === "bearer" ? "eyJhbGciOi..." : authType === "apikey" ? "api_secret_key_..." : "Token desactivado"}
                   />
                   {authType !== "none" && (
@@ -1713,6 +2122,22 @@ function ApiConfigView({ selectedBusinesses, onClose, onClear }: ApiConfigViewPr
                 </div>
               </div>
             </div>
+
+            {/* Custom: include metadata toggle */}
+            {selectedClient && (
+              <div className="flex items-center gap-3 p-3 rounded-xl bg-white/[0.02] border border-white/5 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  id="includeClientName"
+                  checked={includeClientInPayload}
+                  onChange={(e) => setIncludeClientInPayload(e.target.checked)}
+                  className="rounded border-white/20 bg-white/5 text-emerald focus:ring-emerald focus:ring-offset-0 focus:outline-none w-4 h-4 cursor-pointer"
+                />
+                <label htmlFor="includeClientName" className="cursor-pointer select-none">
+                  Incluir el nombre del cliente en el JSON de envío (ej. <code className="text-emerald">{`{ cliente: "${selectedClient.name}", leads: [...] }`}</code>)
+                </label>
+              </div>
+            )}
 
             {/* Test buttons */}
             <div className="flex flex-wrap gap-3 pt-3 border-t border-white/5">
@@ -1812,12 +2237,6 @@ function ApiConfigView({ selectedBusinesses, onClose, onClear }: ApiConfigViewPr
             
             {/* Guide Tabs */}
             <div className="bg-black/30 border-b border-white/5 p-3 flex flex-wrap gap-1">
-              {[
-                ["intro", "Guía", <Info key="info" className="w-3 h-3 text-emerald" />],
-                ["make", "Make", <Sparkles key="make" className="w-3 h-3 text-violet" />],
-                ["zapier", "Zapier", <ExternalLink key="zapier" className="w-3 h-3 text-azure" />],
-                ["custom", "API propia", <Globe key="custom" className="w-3 h-3 text-pink" />]
-              ] as const}
               {([
                 ["intro", "Guía", <Info key="info" className="w-3.5 h-3.5 text-emerald" />],
                 ["make", "Make.com", <Sparkles key="make" className="w-3.5 h-3.5 text-violet" />],
@@ -1980,4 +2399,3 @@ function ApiConfigView({ selectedBusinesses, onClose, onClear }: ApiConfigViewPr
     </div>
   );
 }
-
